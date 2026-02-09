@@ -28,7 +28,7 @@ app.post('/', (req, res) => {
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
   console.log(`\n\nWebhook received ${timestamp}\n`);
   console.log(JSON.stringify(req.body, null, 2));
-  res.status(200).end();
+  res.status(200).send(btoa("Hello World");
 });
 
 // Start the server

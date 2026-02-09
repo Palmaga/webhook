@@ -4,12 +4,11 @@ const app = express();
 
 app.use(express.json());
 
-// CONFIGURACIÓN RÁPIDA
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN; // Mantener en variables de entorno
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// PEGA TU CLAVE AQUÍ ABAJO (Respeta los guiones iniciales y finales)
-const PRIVATE_KEY = `
+// 1. PEGA TU CLAVE AQUÍ
+const RAW_KEY = `
 -----BEGIN ENCRYPTED PRIVATE KEY-----
 MIIFHDBOBgkqhkiG9w0BBQ0wQTApBgkqhkiG9w0BBQwwHAQIOSMqpgOTAKgCAggA
 MAwGCCqGSIb3DQIJBQAwFAYIKoZIhvcNAwcECGXonuaPlXAwBIIEyB3NpmZPFaE1
@@ -41,73 +40,85 @@ Bw8Ks7GjBY4vHtyLkco6SVJfB0hGekfeNaGX962sMroS9OVl7AAfMr0nqe7e5oZE
 dxM8BPgvtJJBLRqm7u6aQA==
 -----END ENCRYPTED PRIVATE KEY-----
 
-`.trim();
+`;
 
-// --- LÓGICA DE DESCIFRADO (ESTÁNDAR META) ---
-function decryptRequest(body, privKey) {
-  const aesKey = crypto.privateDecrypt({
-    key: privKey,
-    padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-    oaepHash: "sha256",
-  }, Buffer.from(body.encrypted_aes_key, 'base64'));
-
-  const flowData = Buffer.from(body.encrypted_flow_data, 'base64');
-  const iv = Buffer.from(body.initial_vector, 'base64');
-  const tag = flowData.slice(-16);
-  const encrypted = flowData.slice(0, -16);
-
-  const decipher = crypto.createDecipheriv('aes-128-gcm', aesKey, iv);
-  decipher.setAuthTag(tag);
-
-  const decrypted = decipher.update(encrypted, 'binary', 'utf8') + decipher.final('utf8');
-  return { decrypted: JSON.parse(decrypted), aesKey };
+/**
+ * FUNCIÓN DEFINITIVA DE LIMPIEZA
+ * Elimina espacios, tabulaciones y retornos de carro que corrompen la clave
+ */
+function getCleanPrivateKey(rawKey) {
+    const lines = rawKey.trim().split('\n');
+    const header = lines[0];
+    const footer = lines[lines.length - 1];
+    const content = lines.slice(1, -1).join('').replace(/\s+/g, '');
+    
+    // Reconstruye la clave con el formato exacto que Node.js requiere
+    return `${header}\n${content.match(/.{1,64}/g).join('\n')}\n${footer}`;
 }
 
-// --- LÓGICA DE CIFRADO DE RESPUESTA ---
+const PRIVATE_KEY = getCleanPrivateKey(RAW_KEY);
+
+// --- FUNCIONES DE SEGURIDAD ---
+
+function decryptRequest(body, privKey) {
+    const aesKey = crypto.privateDecrypt({
+        key: privKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: "sha256",
+    }, Buffer.from(body.encrypted_aes_key, 'base64'));
+
+    const flowDataBuffer = Buffer.from(body.encrypted_flow_data, 'base64');
+    const iv = Buffer.from(body.initial_vector, 'base64');
+    const tag = flowDataBuffer.slice(-16);
+    const encryptedData = flowDataBuffer.slice(0, -16);
+
+    const decipher = crypto.createDecipheriv('aes-128-gcm', aesKey, iv);
+    decipher.setAuthTag(tag);
+
+    const decrypted = decipher.update(encryptedData, 'binary', 'utf8') + decipher.final('utf8');
+    return { decrypted: JSON.parse(decrypted), aesKey };
+}
+
 function encryptResponse(json, aesKey, ivString) {
-  const iv = Buffer.from(ivString, 'base64');
-  const cipher = crypto.createCipheriv('aes-128-gcm', aesKey, iv);
-  const encrypted = cipher.update(JSON.stringify(json), 'utf8', 'base64') + cipher.final('base64');
-  const tag = cipher.getAuthTag().toString('base64');
-  return Buffer.from(encrypted + tag, 'base64').toString('base64');
+    const iv = Buffer.from(ivString, 'base64');
+    const cipher = crypto.createCipheriv('aes-128-gcm', aesKey, iv);
+    const encrypted = cipher.update(JSON.stringify(json), 'utf8', 'base64') + cipher.final('base64');
+    const tag = cipher.getAuthTag().toString('base64');
+    return Buffer.from(encrypted + tag, 'base64').toString('base64');
 }
 
 // --- RUTAS ---
-app.get('/', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    return res.status(200).send(Buffer.from(challenge).toString('base64'));
-  }
-  res.status(403).end();
+app.get('/', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+        return res.status(200).send(Buffer.from(challenge).toString('base64'));
+    }
+    res.status(403).end();
 });
 
 app.post('/', (req, res) => {
-  try {
-    const { decrypted, aesKey } = decryptRequest(req.body, PRIVATE_KEY);
-    console.log("DATOS RECIBIDOS:", decrypted);
+    try {
+        const { decrypted, aesKey } = decryptRequest(req.body, PRIVATE_KEY);
+        
+        const responseJSON = {
+            version: "3.0",
+            screen: "SUCCESS",
+            data: { extension_message_response: { params: { status: "success" } } }
+        };
 
-    // Respuesta estándar para cerrar el Flow exitosamente
-    const responseData = {
-      version: "3.0",
-      screen: "SUCCESS",
-      data: { 
-        extension_message_response: { 
-          params: { status: "completed" } 
-        } 
-      }
-    };
+        const responsePayload = encryptResponse(responseJSON, aesKey, req.body.initial_vector);
+        res.set('Content-Type', 'text/plain');
+        res.status(200).send(responsePayload);
 
-    const responsePayload = encryptResponse(responseData, aesKey, req.body.initial_vector);
-    res.set('Content-Type', 'text/plain');
-    res.status(200).send(responsePayload);
-
-  } catch (e) {
-    console.error("ERROR DE DESCIFRADO:", e.message);
-    res.status(500).send(`Error: ${e.message}`);
-  }
+    } catch (error) {
+        console.error("ERROR:", error.message);
+        // Enviamos el stack para ver dónde rompe exactamente
+        res.status(500).send(`Error: ${error.message}`);
+    }
 });
 
-app.listen(PORT, () => console.log(`Servidor de prueba iniciado en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));

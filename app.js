@@ -5,10 +5,11 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN; // Se mantiene como variable de entorno
 
-// COPIA Y PEGA TU CLAVE COMPLETA ENTRE LAS COMILLAS INVERTIDAS
-const PRIVATE_KEY = `-----BEGIN ENCRYPTED PRIVATE KEY-----
+// PEGA TU CLAVE AQUÍ - La función .trim() eliminará espacios accidentales
+const PRIVATE_KEY_RAW = `
+-----BEGIN ENCRYPTED PRIVATE KEY-----
 MIIFHDBOBgkqhkiG9w0BBQ0wQTApBgkqhkiG9w0BBQwwHAQIOSMqpgOTAKgCAggA
 MAwGCCqGSIb3DQIJBQAwFAYIKoZIhvcNAwcECGXonuaPlXAwBIIEyB3NpmZPFaE1
 /YXaXQe11cuvMX47lAVvP7vU/w2k1eNpVjWBfcIS0cLbG+7V1U16GKMt4+fDETTY
@@ -38,13 +39,15 @@ Gv1tcWoOy4rCP8JFgIMEQbu90DUQTbpwSrvKhqFnMo/QNaoKN1YTzQ9TjCDKLDjm
 Bw8Ks7GjBY4vHtyLkco6SVJfB0hGekfeNaGX962sMroS9OVl7AAfMr0nqe7e5oZE
 dxM8BPgvtJJBLRqm7u6aQA==
 -----END ENCRYPTED PRIVATE KEY-----
-`;
 
-// --- UTILIDADES DE CRIPTOGRAFÍA ---
+`.trim();
+
+// --- FUNCIONES DE SEGURIDAD ---
 
 function decryptRequest(body, privateKey) {
     const { encrypted_flow_data, encrypted_aes_key, initial_vector } = body;
 
+    // Descifrar la clave AES con RSA
     const decryptedAesKey = crypto.privateDecrypt(
         {
             key: privateKey,
@@ -54,6 +57,7 @@ function decryptRequest(body, privateKey) {
         Buffer.from(encrypted_aes_key, 'base64')
     );
 
+    // Descifrar datos con AES-128-GCM
     const flowDataBuffer = Buffer.from(encrypted_flow_data, 'base64');
     const iv = Buffer.from(initial_vector, 'base64');
     const tag = flowDataBuffer.slice(-16);
@@ -79,7 +83,7 @@ function encryptResponse(responseJson, aesKey, ivString) {
     return Buffer.from(encrypted + tag, 'base64').toString('base64');
 }
 
-// --- RUTAS DEL SERVIDOR ---
+// --- RUTAS ---
 
 app.get('/', (req, res) => {
     const mode = req.query['hub.mode'];
@@ -87,17 +91,16 @@ app.get('/', (req, res) => {
     const challenge = req.query['hub.challenge'];
 
     if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-        const response = Buffer.from(challenge).toString('base64');
-        return res.status(200).send(response);
+        return res.status(200).send(Buffer.from(challenge).toString('base64'));
     }
     res.status(403).end();
 });
 
 app.post('/', (req, res) => {
     try {
-        const { decrypted, aesKey } = decryptRequest(req.body, PRIVATE_KEY);
-        console.log("Datos recibidos:", decrypted);
-
+        const { decrypted, aesKey } = decryptRequest(req.body, PRIVATE_KEY_RAW);
+        
+        // Respuesta ajustada a tu pantalla DETAILS
         const responseJSON = {
             version: "3.0",
             screen: "SUCCESS",
@@ -105,7 +108,7 @@ app.post('/', (req, res) => {
                 extension_message_response: {
                     params: {
                         status: "success",
-                        message: `Referencia ${decrypted.referencia} procesada.`
+                        message: "Pago reportado correctamente"
                     }
                 }
             }
@@ -116,9 +119,10 @@ app.post('/', (req, res) => {
         res.status(200).send(encryptedB64Response);
 
     } catch (error) {
-        console.error("Detalle del error:", error);
+        console.error("ERROR DETECTADO:", error.message);
+        // Enviamos el mensaje de error para debug en el simulador de Meta
         res.status(500).send(`Error de descifrado: ${error.message}`);
     }
 });
 
-app.listen(PORT, () => console.log(`Servidor de prueba en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));

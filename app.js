@@ -5,11 +5,11 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN; // Se mantiene como variable de entorno
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// PEGA TU CLAVE AQUÍ - La función .trim() eliminará espacios accidentales
-const PRIVATE_KEY_RAW = `
------BEGIN ENCRYPTED PRIVATE KEY-----
+// 1. PEGA TU CLAVE AQUÍ ABAJO
+// Asegúrate de que no haya espacios en blanco antes de los guiones "-----"
+const MI_CLAVE_PRIVADA = `-----BEGIN ENCRYPTED PRIVATE KEY-----
 MIIFHDBOBgkqhkiG9w0BBQ0wQTApBgkqhkiG9w0BBQwwHAQIOSMqpgOTAKgCAggA
 MAwGCCqGSIb3DQIJBQAwFAYIKoZIhvcNAwcECGXonuaPlXAwBIIEyB3NpmZPFaE1
 /YXaXQe11cuvMX47lAVvP7vU/w2k1eNpVjWBfcIS0cLbG+7V1U16GKMt4+fDETTY
@@ -48,6 +48,7 @@ function decryptRequest(body, privateKey) {
     const { encrypted_flow_data, encrypted_aes_key, initial_vector } = body;
 
     // Descifrar la clave AES con RSA
+    // Usamos el padding exacto que exige Meta: OAEP con SHA-256
     const decryptedAesKey = crypto.privateDecrypt(
         {
             key: privateKey,
@@ -91,6 +92,7 @@ app.get('/', (req, res) => {
     const challenge = req.query['hub.challenge'];
 
     if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+        // Validación obligatoria para WhatsApp Flows en Base64
         return res.status(200).send(Buffer.from(challenge).toString('base64'));
     }
     res.status(403).end();
@@ -98,9 +100,9 @@ app.get('/', (req, res) => {
 
 app.post('/', (req, res) => {
     try {
-        const { decrypted, aesKey } = decryptRequest(req.body, PRIVATE_KEY_RAW);
+        const { decrypted, aesKey } = decryptRequest(req.body, MI_CLAVE_PRIVADA);
         
-        // Respuesta ajustada a tu pantalla DETAILS
+        // Respuesta estructurada para tu pantalla 'DETAILS'
         const responseJSON = {
             version: "3.0",
             screen: "SUCCESS",
@@ -108,7 +110,7 @@ app.post('/', (req, res) => {
                 extension_message_response: {
                     params: {
                         status: "success",
-                        message: "Pago reportado correctamente"
+                        message: "Información procesada"
                     }
                 }
             }
@@ -119,10 +121,10 @@ app.post('/', (req, res) => {
         res.status(200).send(encryptedB64Response);
 
     } catch (error) {
-        console.error("ERROR DETECTADO:", error.message);
-        // Enviamos el mensaje de error para debug en el simulador de Meta
+        console.error("ERROR CRÍTICO:", error.message);
+        // Enviamos el detalle al simulador de Meta para ver qué falla
         res.status(500).send(`Error de descifrado: ${error.message}`);
     }
 });
 
-app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor de prueba iniciado en puerto ${PORT}`));

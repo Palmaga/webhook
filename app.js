@@ -31,7 +31,9 @@ app.post('/', (req, res) => {
   // Para validar la conexión inicial sin errores:
   // Meta espera una respuesta Base64. "SUCCESS" es un estándar común.
   const responsePayload = Buffer.from({
-    "status":"SUCCESS"
+    version: "3.0",
+      screen: "SUCCESS", // Nombre de la pantalla configurada en tu Flow
+      data: { extension_message_response: { params: { status: "completed" } } }
   }).toString('base64');
   res.status(200).send(responsePayload);
 });

@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = "TU_TOKEN_AQUI"; // Escríbelo aquí directamente para probar
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
 // COPIA Y PEGA TU CLAVE COMPLETA ENTRE LAS COMILLAS INVERTIDAS
 const PRIVATE_KEY = `-----BEGIN ENCRYPTED PRIVATE KEY-----

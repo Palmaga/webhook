@@ -30,7 +30,9 @@ app.post('/', (req, res) => {
 
   // Para validar la conexión inicial sin errores:
   // Meta espera una respuesta Base64. "SUCCESS" es un estándar común.
-  const responsePayload = Buffer.from("SUCCESS").toString('base64');
+  const responsePayload = Buffer.from({
+    "status":"SUCCESS"
+  }).toString('base64');
   res.status(200).send(responsePayload);
 });
 

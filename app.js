@@ -3,10 +3,8 @@ const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const app = express();
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'webhook_token_123';
-
-// ✅ USA LLAVE PRIVADA NORMAL, NO ENCRIPTADA
-const PRIVATE_KEY = process.env.PRIVATE_KEY; // PEM sin encriptar
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
 
 if (!PRIVATE_KEY) {
     console.error('❌ ERROR: PRIVATE_KEY es obligatoria');
@@ -19,7 +17,7 @@ app.use(express.json({
     }
 }));
 
-// ✅ VERIFICACIÓN OBLIGATORIA
+// ✅ VERIFICACIÓN
 app.get('/', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -32,11 +30,10 @@ app.get('/', (req, res) => {
     res.status(403).end();
 });
 
-// ✅ DECRYPT - AES-128-CBC (CORRECTO)
+// ✅ DECRYPT - AES-128-CBC
 function decryptRequest(body, privatePem) {
     const { encrypted_aes_key, encrypted_flow_data, initial_vector } = body;
 
-    // Desencriptar AES key con RSA
     const decryptedAesKey = crypto.privateDecrypt(
         {
             key: privatePem,
@@ -46,7 +43,6 @@ function decryptRequest(body, privatePem) {
         Buffer.from(encrypted_aes_key, 'base64')
     );
 
-    // Desencriptar flow data con AES-128-CBC
     const iv = Buffer.from(initial_vector, 'base64');
     const encryptedData = Buffer.from(encrypted_flow_data, 'base64');
 
@@ -65,9 +61,8 @@ function decryptRequest(body, privatePem) {
     };
 }
 
-// ✅ ENCRYPT - AES-128-CBC (CORRECTO)
+// ✅ ENCRYPT - SIEMPRE BASE64
 function encryptResponse(response, aesKeyBuffer, initialVectorBuffer) {
-    // USAR EL MISMO IV, SIN FLIP
     const cipher = crypto.createCipheriv('aes-128-cbc', aesKeyBuffer, initialVectorBuffer);
     cipher.setAutoPadding(true);
 
@@ -77,35 +72,52 @@ function encryptResponse(response, aesKeyBuffer, initialVectorBuffer) {
     ]).toString('base64');
 }
 
-// ✅ ENDPOINT PRINCIPAL - POST /
+// ✅ ENDPOINT PRINCIPAL - SIEMPRE BASE64
 app.post('/', (req, res) => {
     try {
         const body = req.body;
 
-        // Health Check
+        // ============================================
+        // CASO 6: HEALTH CHECK
+        // ============================================
         if (body.health_check) {
-            return res.json({ status: 'healthy' });
+            const healthResponse = {
+                status: 'healthy',
+                timestamp: new Date().toISOString()
+            };
+            // ✅ SIEMPRE Base64
+            const encrypted = Buffer.from(JSON.stringify(healthResponse)).toString('base64');
+            res.set('Content-Type', 'text/plain');
+            return res.status(200).send(encrypted);
         }
 
-        // Error Notification
+        // ============================================
+        // CASO 5: ERROR NOTIFICATION
+        // ============================================
         if (body.error && body.flow_id) {
             console.log('Error notification:', body.error);
+            // ✅ SOLO 200 OK, sin body
             return res.status(200).end();
         }
 
-        // Validar Flow
+        // ============================================
+        // VALIDAR FLOW
+        // ============================================
         if (!body.encrypted_flow_data || !body.encrypted_aes_key || !body.initial_vector) {
             return res.status(200).end();
         }
 
+        // Desencriptar
         const { decryptedBody, aesKeyBuffer, initialVectorBuffer } = decryptRequest(
             body,
             PRIVATE_KEY
         );
 
-        console.log('📡 Flow recibido:', JSON.stringify(decryptedBody, null, 2));
+        console.log('📡 Flow:', JSON.stringify(decryptedBody, null, 2));
 
-        // ✅ CONSTRUIR RESPUESTA - SIEMPRE INCLUIR version Y flow_token
+        // ============================================
+        // CONSTRUIR RESPUESTA
+        // ============================================
         let responseData = {
             version: '3.0',
             flow_token: decryptedBody.flow_token
@@ -145,37 +157,79 @@ app.post('/', (req, res) => {
             }
         }
 
-        // ⚠️ "SUCCESS" ES PALABRA RESERVADA - NO USAR
+        // ⚠️ "SUCCESS" es reservado
         if (responseData.screen === 'SUCCESS') {
             responseData.screen = 'CONFIRMATION';
         }
 
-        // Encriptar y enviar
+        // ✅ ENCRIPTAR Y ENVIAR BASE64
         const encryptedResponse = encryptResponse(
             responseData,
             aesKeyBuffer,
             initialVectorBuffer
         );
 
+        console.log('✅ Respondiendo con Base64');
         res.set('Content-Type', 'text/plain');
         res.status(200).send(encryptedResponse);
 
     } catch (error) {
         console.error('❌ Error:', error.message);
+        
+        // ============================================
+        // ⚠️ IMPORTANTE: SIEMPRE RESPONDER CON BASE64
+        // ============================================
+        const errorResponse = {
+            version: '3.0',
+            screen: 'ERROR',
+            flow_token: req.body?.flow_token || 'error',
+            data: {
+                error: error.message,
+                timestamp: new Date().toISOString()
+            }
+        };
+        
+        // Intentamos encriptar si tenemos los datos, sino Base64 fijo
+        try {
+            if (req.body?.encrypted_aes_key && req.body?.initial_vector) {
+                const { aesKeyBuffer, initialVectorBuffer } = decryptRequest(
+                    req.body,
+                    PRIVATE_KEY
+                );
+                const encryptedError = encryptResponse(errorResponse, aesKeyBuffer, initialVectorBuffer);
+                res.set('Content-Type', 'text/plain');
+                return res.status(200).send(encryptedError);
+            }
+        } catch (e) {
+            // Si no podemos encriptar, Base64 de un JSON simple
+            const fallbackBase64 = Buffer.from(JSON.stringify({
+                version: '3.0',
+                screen: 'ERROR',
+                flow_token: 'error',
+                data: { error: 'Internal error' }
+            })).toString('base64');
+            
+            res.set('Content-Type', 'text/plain');
+            return res.status(200).send(fallbackBase64);
+        }
+        
         res.status(200).end();
     }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`
-╔════════════════════════════════════════════╗
-║    🚀 FLOW WEBHOOK - PRODUCCIÓN           ║
-╠════════════════════════════════════════════╣
-║  📍 Endpoint: POST /                      ║
-║  📍 Puerto: ${PORT}                           ║
-║  🔐 Algoritmo: AES-128-CBC ✅            ║
-║  🔑 Llave: PRIVATE KEY (no encriptada)   ║
-║  ✅ Verificación: GET /                  ║
-╚════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════╗
+║    🚀 FLOW WEBHOOK - SIEMPRE BASE64                     ║
+╠══════════════════════════════════════════════════════════╣
+║  📍 Endpoint: POST /                                    ║
+║  📍 Puerto: ${PORT}                                          ║
+║  🔐 Algoritmo: AES-128-CBC                              ║
+╠══════════════════════════════════════════════════════════╣
+║  ✅ ÉXITO:   Content-Type: text/plain + BASE64         ║
+║  ✅ ERROR:   Content-Type: text/plain + BASE64         ║
+║  ✅ HEALTH:  Content-Type: text/plain + BASE64         ║
+║  ❌ NUNCA:   JSON, HTML, texto plano                   ║
+╚══════════════════════════════════════════════════════════╝
     `);
 });

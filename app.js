@@ -4,131 +4,218 @@ const crypto = require('crypto');
 
 const app = express();
 
-// Middleware para parsear JSON
+// Middleware para parsear JSON con rawBody para firma
 app.use(express.json({
   verify: (req, res, buf) => {
     req.rawBody = buf;
   }
 }));
 
-// 📌 CONFIGURACIÓN CON VALORES POR DEFECTO PARA EVITAR ERRORES AL DESPLEGAR
 const port = process.env.PORT || 3000;
-const verifyToken = process.env.VERIFY_TOKEN || 'webhook_verify_token_123';
-const appSecret = process.env.APP_SECRET || '';
-const privateKey = process.env.PRIVATE_KEY || '';
+const verifyToken = process.env.VERIFY_TOKEN;
+const appSecret = process.env.APP_SECRET;
+let privateKey = process.env.PRIVATE_KEY;
 
-// ⚠️ NO USAR CRYPTO SI NO HAY LLAVES - Evita errores al desplegar
-const hasEncryption = privateKey && privateKey.includes('BEGIN PRIVATE KEY');
+// 🔧 Formatear llave privada correctamente
+if (privateKey) {
+  // Reemplazar \\n con saltos de línea reales
+  privateKey = privateKey.replace(/\\n/g, '\n');
+}
 
-// ✅ VERIFICACIÓN DEL WEBHOOK - SIN BASE64 para máxima compatibilidad
+// ✅ VERIFICACIÓN DEL WEBHOOK
 app.get(['/', '/webhook'], (req, res) => {
   const { 'hub.mode': mode, 'hub.challenge': challenge, 'hub.verify_token': token } = req.query;
 
-  console.log('🔐 Verificando webhook...');
-  
   if (mode === 'subscribe' && token === verifyToken) {
-    console.log('✅ VERIFICACIÓN EXITOSA');
-    // IMPORTANTE: Enviar SOLO el challenge como string
-    return res.status(200).send(String(challenge));
+    console.log('✅ WEBHOOK VERIFICADO');
+    res.set('Content-Type', 'text/plain');
+    res.status(200).send(String(challenge));
   } else {
-    console.log('❌ VERIFICACIÓN FALLIDA - Token incorrecto');
-    return res.status(403).send('Token inválido');
+    res.status(403).end();
   }
 });
 
-// 📥 RECEPCIÓN DE WEBHOOKS
-app.post(['/', '/webhook'], (req, res) => {
-  const timestamp = new Date().toISOString();
-  
-  console.log('\n' + '='.repeat(60));
-  console.log(`📡 Webhook recibido: ${timestamp}`);
-  console.log('='.repeat(60));
-  
+// 🔐 Función para desencriptar datos del Flow
+function decryptFlowData(encryptedFlowData, encryptedAesKey, initialVector) {
   try {
-    const body = req.body;
-    console.log('📦 Payload:', JSON.stringify(body, null, 2));
+    console.log('🔐 Desencriptando Flow...');
     
-    // 📱 DETECTAR TIPO DE MENSAJE
-    if (body.entry) {
-      // Mensaje normal de WhatsApp
-      console.log('✅ Mensaje WhatsApp recibido');
-      processWhatsAppMessage(body);
-      return res.status(200).end();
-      
-    } else if (body.encrypted_flow_data) {
-      // Flow de WhatsApp
-      console.log('🎯 Flow de WhatsApp detectado');
-      
-      if (hasEncryption) {
-        console.log('🔐 Encriptación configurada - Procesando Flow...');
-        // Aquí va tu lógica de desencriptación cuando tengas las llaves
-      } else {
-        console.log('⚠️ Modo desarrollo: Respondiendo con challenge de prueba');
-        // Respuesta de prueba para desarrollo
-        const testResponse = "yZcJQaH3AqfzKgjn64vAcASaJrOMN27S6CESyU68WN/cDCP6abskoMa/pPjszXGKyyh/23lw84HW6ZilMfU6KL3j5AWwOx6GWNwtq8Aj7gz/Y7R+LccmJWxKo2UccMu5xJlduIFlFlOS1gAnOwKrk8wpuprsi4jAOspw3xO2uh3J883aC/csu/MhRPiYCaGGy/tTNvVDmb2Gw1WXFmpvLsZ/SBrgG0cDQJjQzpTO";
-        return res.set('Content-Type', 'text/plain').status(200).send(testResponse);
-      }
-      
-    } else {
-      // Otro tipo de mensaje
-      console.log('📦 Otro tipo de payload');
-    }
+    // 1. Desencriptar AES key con RSA (OAEP SHA-256)
+    const aesKey = crypto.privateDecrypt(
+      {
+        key: privateKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256',
+      },
+      Buffer.from(encryptedAesKey, 'base64')
+    );
     
-    // SIEMPRE responder 200 OK
-    res.status(200).end();
+    console.log('  ✅ AES Key desencriptada');
+    
+    // 2. Desencriptar flow data con AES-128-CBC
+    const iv = Buffer.from(initialVector, 'base64');
+    const encryptedData = Buffer.from(encryptedFlowData, 'base64');
+    
+    const decipher = crypto.createDecipheriv('aes-128-cbc', aesKey, iv);
+    decipher.setAutoPadding(true);
+    
+    const decrypted = Buffer.concat([
+      decipher.update(encryptedData),
+      decipher.final()
+    ]);
+    
+    const decryptedString = decrypted.toString('utf8');
+    console.log('  ✅ Flow data desencriptada:', decryptedString);
+    
+    return JSON.parse(decryptedString);
     
   } catch (error) {
-    console.error('❌ Error procesando webhook:', error);
-    // Siempre 200 aunque haya error
-    res.status(200).end();
-  }
-});
-
-// Función para procesar mensajes de WhatsApp
-function processWhatsAppMessage(body) {
-  try {
-    body.entry?.forEach(entry => {
-      entry.changes?.forEach(change => {
-        if (change.value?.messages) {
-          change.value.messages.forEach(message => {
-            console.log(`  📨 De: ${message.from}`);
-            console.log(`  📝 Tipo: ${message.type}`);
-            
-            if (message.type === 'text') {
-              console.log(`  💬 Texto: ${message.text?.body}`);
-            } else if (message.type === 'interactive') {
-              console.log(`  🎯 Interactivo:`, message.interactive);
-            }
-          });
-        }
-        
-        if (change.value?.statuses) {
-          change.value.statuses.forEach(status => {
-            console.log(`  📊 Estado: ${status.status}`);
-          });
-        }
-      });
-    });
-  } catch (error) {
-    console.error('Error procesando mensaje:', error);
+    console.error('❌ Error desencriptando:', error);
+    throw error;
   }
 }
 
-// 📊 Página de estado
-app.get('/status', (req, res) => {
-  const status = {
-    server: 'running',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    config: {
-      port: port,
-      verifyToken: verifyToken ? '✅ configurado' : '⚠️ usando default',
-      appSecret: appSecret ? '✅ configurado' : '⚠️ opcional',
-      encryption: hasEncryption ? '✅ activa' : '⚠️ inactiva (modo desarrollo)'
-    }
-  };
+// 🔐 Función para ENCRIPTAR respuesta del Flow
+function encryptFlowResponse(responseData, encryptedAesKey, initialVector) {
+  try {
+    console.log('🔐 Encriptando respuesta...');
+    
+    // 1. Desencriptar AES key con RSA (misma llave)
+    const aesKey = crypto.privateDecrypt(
+      {
+        key: privateKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256',
+      },
+      Buffer.from(encryptedAesKey, 'base64')
+    );
+    
+    // 2. Convertir respuesta a JSON string
+    const responseString = JSON.stringify(responseData);
+    console.log('  📤 Respuesta original:', responseString);
+    
+    // 3. Encriptar con AES-128-CBC usando el mismo IV
+    const iv = Buffer.from(initialVector, 'base64');
+    const cipher = crypto.createCipheriv('aes-128-cbc', aesKey, iv);
+    cipher.setAutoPadding(true);
+    
+    const encrypted = Buffer.concat([
+      cipher.update(responseString, 'utf8'),
+      cipher.final()
+    ]);
+    
+    // 4. Convertir a Base64
+    const encryptedBase64 = encrypted.toString('base64');
+    console.log('  🔐 Respuesta encriptada (Base64):', encryptedBase64.substring(0, 50) + '...');
+    
+    return encryptedBase64;
+    
+  } catch (error) {
+    console.error('❌ Error encriptando respuesta:', error);
+    throw error;
+  }
+}
+
+// 📥 RECEPCIÓN DE FLOWS
+app.post(['/', '/webhook'], (req, res) => {
+  console.log('\n' + '📱'.repeat(20));
+  console.log('📡 FLOW RECIBIDO');
+  console.log('📱'.repeat(20));
   
-  res.json(status);
+  try {
+    const body = req.body;
+    
+    // Verificar si es un Flow encriptado
+    if (body.encrypted_flow_data && body.encrypted_aes_key && body.initial_vector) {
+      
+      console.log('\n📦 Datos encriptados recibidos:');
+      console.log('  encrypted_flow_data:', body.encrypted_flow_data.substring(0, 30) + '...');
+      console.log('  encrypted_aes_key:', body.encrypted_aes_key.substring(0, 30) + '...');
+      console.log('  initial_vector:', body.initial_vector.substring(0, 30) + '...');
+      
+      // Verificar que tenemos la llave privada
+      if (!privateKey) {
+        console.error('❌ PRIVATE_KEY no configurada');
+        return res.status(500).json({ error: 'Private key not configured' });
+      }
+      
+      // 1️⃣ DESENCRIPTAR DATOS
+      const decryptedData = decryptFlowData(
+        body.encrypted_flow_data,
+        body.encrypted_aes_key,
+        body.initial_vector
+      );
+      
+      console.log('\n📊 DATOS DESENCRIPTADOS:');
+      console.log(JSON.stringify(decryptedData, null, 2));
+      
+      // 2️⃣ PROCESAR SEGÚN EL TIPO DE FLOW
+      let flowResponse;
+      
+      if (decryptedData.screen === 'INITIAL') {
+        // Flow de inicio - respuesta inicial
+        flowResponse = {
+          version: decryptedData.version || '3.0',
+          screen: decryptedData.screen,
+          data: {
+            ...decryptedData.data,
+            response_type: 'initial',
+            timestamp: new Date().toISOString()
+          }
+        };
+      } else {
+        // Flow con datos del formulario
+        flowResponse = {
+          version: decryptedData.version || '3.0',
+          screen: decryptedData.screen,
+          data: {
+            ...decryptedData.data,
+            status: 'success',
+            confirmed: true,
+            processed_at: new Date().toISOString()
+          }
+        };
+      }
+      
+      console.log('\n📤 RESPUESTA A ENVIAR:');
+      console.log(JSON.stringify(flowResponse, null, 2));
+      
+      // 3️⃣ ENCRIPTAR RESPUESTA
+      const encryptedResponse = encryptFlowResponse(
+        flowResponse,
+        body.encrypted_aes_key,
+        body.initial_vector
+      );
+      
+      // 4️⃣ ENVIAR RESPUESTA ENCRIPTADA
+      console.log('\n✅ Enviando respuesta encriptada...');
+      res.set('Content-Type', 'text/plain');
+      res.status(200).send(encryptedResponse);
+      
+    } else if (body.entry) {
+      // Mensaje normal de WhatsApp
+      console.log('📨 Mensaje WhatsApp normal');
+      console.log(JSON.stringify(body, null, 2));
+      res.status(200).end();
+    } else {
+      console.log('📦 Otro tipo de payload');
+      console.log(JSON.stringify(body, null, 2));
+      res.status(200).end();
+    }
+    
+  } catch (error) {
+    console.error('❌ Error:', error);
+    res.status(200).json({ error: 'Internal server error' });
+  }
+});
+
+// 📊 Health check
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    encryption: privateKey ? 'configured' : 'not configured'
+  });
 });
 
 // 🏠 Página principal
@@ -136,148 +223,60 @@ app.get('/', (req, res) => {
   res.send(`
     <html>
       <head>
-        <title>Webhook Meta Flow</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Meta Flow Webhook</title>
         <style>
-          body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            padding: 30px; 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            margin: 0;
-            min-height: 100vh;
-          }
-          .container { 
-            max-width: 800px; 
-            margin: 0 auto; 
-            background: rgba(255,255,255,0.95);
-            color: #333;
-            padding: 40px; 
-            border-radius: 20px; 
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-          }
-          h1 { margin-top: 0; color: #667eea; }
-          .success { color: #10b981; font-weight: bold; }
+          body { font-family: Arial; padding: 40px; background: #f5f5f5; }
+          .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+          .success { color: #10b981; }
           .warning { color: #f59e0b; }
-          code { 
-            background: #f3f4f6; 
-            padding: 2px 6px; 
-            border-radius: 4px;
-            font-size: 14px;
-          }
-          pre { 
-            background: #1f2937; 
-            color: #e5e7eb; 
-            padding: 15px; 
-            border-radius: 10px;
-            overflow-x: auto;
-          }
-          .badge {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: bold;
-            margin-left: 10px;
-          }
-          .badge-success { background: #10b981; color: white; }
-          .badge-warning { background: #f59e0b; color: white; }
+          code { background: #f3f4f6; padding: 2px 5px; border-radius: 3px; }
+          pre { background: #1f2937; color: #fff; padding: 15px; border-radius: 5px; overflow-x: auto; }
         </style>
       </head>
       <body>
         <div class="container">
-          <h1>🚀 Webhook Meta Flow</h1>
-          <p>
-            ✅ Servidor funcionando correctamente
-            <span class="badge badge-success">v1.0.0</span>
+          <h1>🚀 Meta Flow Webhook</h1>
+          <p class="success">✅ Servidor funcionando correctamente</p>
+          
+          <h3>🔐 Estado de encriptación:</h3>
+          <p class="${privateKey ? 'success' : 'warning'}">
+            ${privateKey ? '✅ PRIVATE_KEY configurada' : '⚠️ PRIVATE_KEY no configurada'}
           </p>
           
-          <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
-          
-          <h3>📋 Configuración actual:</h3>
-          <ul style="list-style: none; padding: 0;">
-            <li style="margin: 10px 0;">
-              🔌 Puerto: <code>${port}</code>
-            </li>
-            <li style="margin: 10px 0;">
-              🔐 Verify Token: <code>${verifyToken.substring(0, 10)}...</code>
-              ${verifyToken !== 'webhook_verify_token_123' ? 
-                '<span class="badge badge-success">personalizado</span>' : 
-                '<span class="badge badge-warning">default</span>'}
-            </li>
-            <li style="margin: 10px 0;">
-              🔑 Encriptación: 
-              ${hasEncryption ? 
-                '<span class="badge badge-success">activa</span>' : 
-                '<span class="badge badge-warning">modo desarrollo</span>'}
-            </li>
+          <h3>📋 Endpoints:</h3>
+          <ul>
+            <li><code>GET /webhook</code> - Verificación</li>
+            <li><code>POST /webhook</code> - Webhook (soporta Flows encriptados)</li>
+            <li><code>GET /health</code> - Health check</li>
           </ul>
           
-          <h3>📌 Endpoints disponibles:</h3>
-          <ul style="list-style: none; padding: 0;">
-            <li style="margin: 10px 0;">
-              <code>GET /webhook</code> - Verificación del webhook
-            </li>
-            <li style="margin: 10px 0;">
-              <code>POST /webhook</code> - Recibir mensajes
-            </li>
-            <li style="margin: 10px 0;">
-              <code>GET /status</code> - Estado del servidor (JSON)
-            </li>
-            <li style="margin: 10px 0;">
-              <code>GET /</code> - Esta página
-            </li>
-          </ul>
-          
-          <h3>🧪 Prueba de verificación:</h3>
-          <pre>curl "${req.protocol}://${req.get('host')}/webhook?hub.mode=subscribe&hub.challenge=123456&hub.verify_token=${verifyToken}"</pre>
-          
-          <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
-          
-          <p style="color: #6b7280; font-size: 14px; text-align: center;">
-            ⚡ Listo para recibir webhooks de Meta WhatsApp Business API
-          </p>
+          <h3>🔧 Configuración de PRIVATE_KEY:</h3>
+          <pre>
+# Generar llave privada RSA
+openssl genrsa -out private.key 2048
+
+# Ver la llave (cópiala completa)
+cat private.key
+
+# En tu plataforma, configura PRIVATE_KEY con el contenido completo
+          </pre>
         </div>
       </body>
     </html>
   `);
 });
 
-// 📋 Health check para plataformas de despliegue
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
+// Iniciar servidor
+app.listen(port, '0.0.0.0', () => {
+  console.log('\n' + '🚀'.repeat(20));
+  console.log('   SERVIDOR WEBHOOK META FLOW');
+  console.log('🚀'.repeat(20) + '\n');
+  console.log(`📌 Puerto: ${port}`);
+  console.log(`📌 Verify Token: ${verifyToken || 'No configurado'}`);
+  console.log(`📌 Encriptación: ${privateKey ? '✅ Activa' : '❌ Inactiva'}`);
+  console.log('\n📌 Endpoints:');
+  console.log(`   GET  /webhook - Verificación`);
+  console.log(`   POST /webhook - Webhook`);
+  console.log(`   GET  /health - Health check`);
+  console.log(`   GET  / - Página principal\n`);
 });
-
-// 🚀 Iniciar servidor
-const server = app.listen(port, '0.0.0.0', () => {
-  console.log('\n' + '⭐'.repeat(30));
-  console.log('   🚀 WEBHOOK META FLOW DESPLEGADO');
-  console.log('⭐'.repeat(30));
-  console.log(`\n📌 Servidor:`);
-  console.log(`   • Puerto: ${port}`);
-  console.log(`   • Modo: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`   • Verify Token: ${verifyToken}`);
-  console.log(`   • Encriptación: ${hasEncryption ? '✅ Activa' : '⚠️ Desarrollo'}`);
-  console.log(`\n📌 Endpoints:`);
-  console.log(`   • GET  /webhook - Verificación`);
-  console.log(`   • POST /webhook - Webhook`);
-  console.log(`   • GET  /status - Estado`);
-  console.log(`   • GET  /health - Health check`);
-  console.log(`   • GET  / - Página principal`);
-  console.log('\n' + '⭐'.repeat(30) + '\n');
-});
-
-// Manejo de errores global
-process.on('uncaughtException', (err) => {
-  console.error('❌ Error no capturado:', err);
-  // No matamos el proceso en producción
-  if (process.env.NODE_ENV !== 'production') {
-    process.exit(1);
-  }
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Promesa rechazada:', reason);
-});
-
-module.exports = app;

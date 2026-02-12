@@ -1,124 +1,209 @@
+// Import Express.js
 const express = require('express');
-const crypto = require('crypto');
+const crypto = require('crypto'); // Para verificar firmas
+
+// Create an Express app
 const app = express();
 
-app.use(express.json());
+// Middleware para parsear JSON bodies (raw para verificar firmas)
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf; // Guardar raw body para verificar firma
+  }
+}));
 
-const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+// Set port and verify_token
+const port = process.env.PORT || 3000;
+const verifyToken = process.env.VERIFY_TOKEN;
+const appSecret = process.env.APP_SECRET; // Necesario para verificar firmas
 
-// 1. PEGA TU CLAVE AQUÍ
-const RAW_KEY = `
------BEGIN ENCRYPTED PRIVATE KEY-----
-MIIFHDBOBgkqhkiG9w0BBQ0wQTApBgkqhkiG9w0BBQwwHAQIOSMqpgOTAKgCAggA
-MAwGCCqGSIb3DQIJBQAwFAYIKoZIhvcNAwcECGXonuaPlXAwBIIEyB3NpmZPFaE1
-/YXaXQe11cuvMX47lAVvP7vU/w2k1eNpVjWBfcIS0cLbG+7V1U16GKMt4+fDETTY
-KgJfaLKS6ARspvX96+g/shcqT0UOeFn/vBFpgCIWToOlGpLESBNXCquOqG0zmipa
-cWJF1ST18Y2xx976EAY8J83o4Q1XQZlrknirbrt0b87SoCoweEN0uwxWhy1KGyIB
-qCLDwzHBJrtT8GBBmUnHpJfB0sxkrvUxizEZKufmT56WVyAwW09LYSf7p95qBrEZ
-relzcx1jn7alV9eYxn2kkpDTbZNPcNWxvvGoulEEkIK4WE9pwxAbe7Od+TpzId7a
-/CTRtT1sKCsHxJSZzrH3Lff1iQqVxyuI0yikwGwsrZgXlJXYnW+ZjfZ2v3ZbdRl8
-+NeOm7FqWn0IgnLUd+MMk7f64b5ZfibKJ9skD7CYWjHhRIsLQhrv120P9AXfOUpL
-MvdpRLw3JEnEqxHZGOvzhqkUBHIoMLs3cTzzPEJh6xvibexR6nMH5UKKTCae7mQp
-Xc1Wt+VYtd6I+83QHdNjT6gWJMyLCnFLjr/x4w0yFv2Q7mTWIvsUp2g6StRiZYFL
-nb9iERD1GpJMuSvo97VTiBBjWci/IbHhKNkoXc0/yQFB/SNHO4LiCxGxHV8xgapk
-xPbCmpNgms+GU+o6vouu7Rh4ra6r7IREw+hNafRha/0VVKUSixCZt8nRr2Nl9J0p
-2VZdW94gJi6g84d1hHnzkUwv1xxvjT6BODj0ZELozyh+xGDbpjSgK8iZD+SOVrkI
-yiTKKNHVG43YGH9Blq/n5JH2RlNIZalxI9w7DheZ7ueJY1MB4rX/T4GpdmXlo1Bo
-MbEHO8Xw6hCqnVj0/0a+7UkSuorcMryyk0UbnXHqOezjnxPDtFJEmUSnAN2FA5k6
-HIggKA9SN/zFvB1CgH8ypYnXkWrKivExvHmcnHG3EVRpcgRj9BYlLbaxaskaDP9E
-8mD3jFXY7iIKTW1XTb5XU78eTcsb4mP3usU87/SV7xO5CHiU2fi4MemBn0at+3rM
-/HWBcFmmxhheVB86xwlhCtYIBXJClp9NKZ25XKTpQShEXyi4iVaoCIuzvc9YwPBv
-HCWZLZN7vs0d47BRY0rrUJ2DHGHecXzyvXDi5B2ij/V5Jd0cQkYV9bK+ShGD1NUN
-LPv1yHdIUh2+dg9KfZNupFkrPibjPknquvUTfQcS0YwDWjYuyBwJVONrqRPabIqN
-erzT9jX7hGjP4PM7aCfJhXRQxythn5H+lDpsP0Xz164X4J+w3kOfhnCdRHCfICkm
-eGYpsJ+eE2r0kBhkK9loOp7sEz86EcSM5hnxpUTPKCWMplu4u//hLDL+iaU+PQ7q
-Gv1tcWoOy4rCP8JFgIMEQbu90DUQTbpwSrvKhqFnMo/QNaoKN1YTzQ9TjCDKLDjm
-/JfpZ8jUDkf3ISuR+AP5iKCCErfwA+jF0TW4Jl9VdPqVwMM0tfzTezzq4c28LdZ/
-2ieq0gDLmYNYS+aV+UBBFNrViNLS+SzRSCvqDDc8cfctC4Id+SkD3igZqC3kRxGs
-Bw8Ks7GjBY4vHtyLkco6SVJfB0hGekfeNaGX962sMroS9OVl7AAfMr0nqe7e5oZE
-dxM8BPgvtJJBLRqm7u6aQA==
------END ENCRYPTED PRIVATE KEY-----
+// Función para verificar firma de Meta
+function verifySignature(req, res, next) {
+  if (!appSecret) {
+    console.log('APP_SECRET no configurado, saltando verificación de firma');
+    return next();
+  }
 
-`;
+  const signature = req.headers['x-hub-signature-256'];
+  if (!signature) {
+    console.log('No se encontró firma en el webhook');
+    return res.status(401).send('No signature found');
+  }
 
-/**
- * FUNCIÓN DEFINITIVA DE LIMPIEZA
- * Elimina espacios, tabulaciones y retornos de carro que corrompen la clave
- */
-function getCleanPrivateKey(rawKey) {
-    const lines = rawKey.trim().split('\n');
-    const header = lines[0];
-    const footer = lines[lines.length - 1];
-    const content = lines.slice(1, -1).join('').replace(/\s+/g, '');
+  const elements = signature.split('=');
+  const signatureHash = elements[1];
+  const expectedHash = crypto
+    .createHmac('sha256', appSecret)
+    .update(req.rawBody)
+    .digest('hex');
+
+  if (signatureHash !== expectedHash) {
+    console.log('Firma inválida');
+    return res.status(401).send('Invalid signature');
+  }
+
+  console.log('Firma verificada correctamente');
+  next();
+}
+
+// Función para procesar mensajes Flow
+function processFlowMessage(entry) {
+  const changes = entry.changes || [];
+  
+  changes.forEach(change => {
+    const value = change.value;
     
-    // Reconstruye la clave con el formato exacto que Node.js requiere
-    return `${header}\n${content.match(/.{1,64}/g).join('\n')}\n${footer}`;
-}
-
-const PRIVATE_KEY = getCleanPrivateKey(RAW_KEY);
-
-// --- FUNCIONES DE SEGURIDAD ---
-
-function decryptRequest(body, privKey) {
-    const aesKey = crypto.privateDecrypt({
-        key: privKey,
-        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: "sha256",
-    }, Buffer.from(body.encrypted_aes_key, 'base64'));
-
-    const flowDataBuffer = Buffer.from(body.encrypted_flow_data, 'base64');
-    const iv = Buffer.from(body.initial_vector, 'base64');
-    const tag = flowDataBuffer.slice(-16);
-    const encryptedData = flowDataBuffer.slice(0, -16);
-
-    const decipher = crypto.createDecipheriv('aes-128-gcm', aesKey, iv);
-    decipher.setAuthTag(tag);
-
-    const decrypted = decipher.update(encryptedData, 'binary', 'utf8') + decipher.final('utf8');
-    return { decrypted: JSON.parse(decrypted), aesKey };
-}
-
-function encryptResponse(json, aesKey, ivString) {
-    const iv = Buffer.from(ivString, 'base64');
-    const cipher = crypto.createCipheriv('aes-128-gcm', aesKey, iv);
-    const encrypted = cipher.update(JSON.stringify(json), 'utf8', 'base64') + cipher.final('base64');
-    const tag = cipher.getAuthTag().toString('base64');
-    return Buffer.from(encrypted + tag, 'base64').toString('base64');
-}
-
-// --- RUTAS ---
-
-app.get('/', (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-        return res.status(200).send(Buffer.from(challenge).toString('base64'));
-    }
-    res.status(403).end();
-});
-
-app.post('/', (req, res) => {
-    try {
-        const { decrypted, aesKey } = decryptRequest(req.body, PRIVATE_KEY);
+    // Verificar si es un mensaje de WhatsApp
+    if (value.messages && value.messages.length > 0) {
+      const message = value.messages[0];
+      const contact = value.contacts ? value.contacts[0] : null;
+      
+      // Verificar si es un mensaje interactivo de tipo Flow
+      if (message.type === 'interactive' && message.interactive) {
+        const interactive = message.interactive;
         
-        const responseJSON = {
-            version: "3.0",
-            screen: "SUCCESS",
-            data: { extension_message_response: { params: { status: "success" } } }
-        };
-
-        const responsePayload = encryptResponse(responseJSON, aesKey, req.body.initial_vector);
-        res.set('Content-Type', 'text/plain');
-        res.status(200).send(responsePayload);
-
-    } catch (error) {
-        console.error("ERROR:", error.message);
-        // Enviamos el stack para ver dónde rompe exactamente
-        res.status(500).send(`Error: ${error.message}`);
+        // Determinar el tipo de interacción Flow
+        if (interactive.type === 'flow') {
+          console.log('📱 Mensaje Flow detectado!');
+          console.log('De:', contact?.wa_id || message.from);
+          console.log('Flow data:', JSON.stringify(interactive.flow, null, 2));
+          
+          // Aquí puedes procesar los datos específicos del Flow
+          handleFlowResponse(message.from, interactive.flow);
+          
+        } else if (interactive.type === 'nfm_reply') {
+          console.log('🔄 Respuesta de Flow (nfm_reply) detectada!');
+          console.log('De:', contact?.wa_id || message.from);
+          console.log('NFM Reply:', JSON.stringify(interactive.nfm_reply, null, 2));
+          
+          // Procesar respuesta del Flow
+          handleNfmReply(message.from, interactive.nfm_reply);
+        }
+      }
+      
+      // Otros tipos de mensajes
+      else {
+        console.log('📨 Otro tipo de mensaje:', message.type);
+        console.log(JSON.stringify(message, null, 2));
+      }
     }
+    
+    // Verificar estados
+    if (value.statuses) {
+      value.statuses.forEach(status => {
+        console.log('📊 Estado de mensaje:', status.status);
+        console.log('ID:', status.id);
+        if (status.pricing) {
+          console.log('Pricing:', status.pricing);
+        }
+        if (status.conversation) {
+          console.log('Conversación:', status.conversation.id);
+        }
+      });
+    }
+  });
+}
+
+// Función para manejar respuestas de Flow
+function handleFlowResponse(from, flowData) {
+  // Aquí implementas tu lógica para procesar la respuesta del Flow
+  console.log(`Procesando respuesta Flow de ${from}`);
+  console.log('Flow ID:', flowData.id);
+  console.log('Flow screen:', flowData.screen);
+  console.log('Flow data:', JSON.stringify(flowData.data, null, 2));
+  
+  // Ejemplo: Guardar en base de datos, procesar respuestas, etc.
+}
+
+// Función para manejar NFM Reply
+function handleNfmReply(from, nfmReply) {
+  // Procesar respuestas de Flows de tipo nfm_reply
+  console.log(`Procesando NFM Reply de ${from}`);
+  console.log('Response JSON:', nfmReply.response_json);
+  
+  try {
+    // Parsear la respuesta JSON
+    const responseData = JSON.parse(nfmReply.response_json);
+    console.log('Datos parseados:', responseData);
+    
+    // Aquí puedes acceder a los campos específicos del Flow
+    // Por ejemplo: responseData.flow_name, responseData.screen_01, etc.
+    
+  } catch (error) {
+    console.error('Error parseando response_json:', error);
+  }
+}
+
+// Route for GET requests (verificación del webhook)
+app.get('/webhook', (req, res) => {
+  const { 'hub.mode': mode, 'hub.challenge': challenge, 'hub.verify_token': token } = req.query;
+
+  if (mode === 'subscribe' && token === verifyToken) {
+    console.log('✅ WEBHOOK VERIFICADO CORRECTAMENTE');
+    res.status(200).send(challenge);
+  } else {
+    console.log('❌ Error de verificación - Token inválido');
+    res.status(403).end();
+  }
 });
 
-app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));
+// Route for POST requests (recibir webhooks)
+app.post('/webhook', verifySignature, (req, res) => {
+  const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  console.log(`\n📡 Webhook recibido ${timestamp}\n`);
+  
+  try {
+    const body = req.body;
+    console.log('📦 Payload completo:');
+    console.log(JSON.stringify(body, null, 2));
+    
+    // Procesar cada entrada del webhook
+    if (body.entry) {
+      body.entry.forEach(entry => {
+        console.log(`\n📋 Procesando entry ID: ${entry.id}`);
+        processFlowMessage(entry);
+      });
+    }
+    
+    // Siempre responder con 200 OK para Meta
+    res.status(200).end();
+    
+  } catch (error) {
+    console.error('❌ Error procesando webhook:', error);
+    // Aún así responder 200 para no reintentar
+    res.status(200).end();
+  }
+});
+
+// Ruta para pruebas locales
+app.get('/', (req, res) => {
+  res.send('🚀 Webhook server para Meta Flow está funcionando!');
+});
+
+// Iniciar el servidor
+app.listen(port, () => {
+  console.log(`
+╔════════════════════════════════════════╗
+║   🚀 Servidor Webhook para Meta Flow   ║
+╠════════════════════════════════════════╣
+║  Puerto: ${port.padEnd(30)} ║
+║  Estado: ✅ Activo                     ║
+║  Verificación: ${verifyToken ? '✅ Configurada' : '⚠️  No configurada'}     ║
+║  App Secret: ${appSecret ? '✅ Configurado' : '⚠️  No configurado'}       ║
+╚════════════════════════════════════════╝
+  `);
+  
+  console.log('📱 Endpoints disponibles:');
+  console.log(`   GET  /webhook - Verificación`);
+  console.log(`   POST /webhook - Recibir mensajes (incluyendo Flow)`);
+  console.log(`   GET  / - Página de estado\n`);
+});
+
+// Manejo de errores no capturados
+process.on('uncaughtException', (error) => {
+  console.error('❌ Error no capturado:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Promesa rechazada no manejada:', reason);
+});

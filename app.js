@@ -1,18 +1,23 @@
-import express from "express";
-import crypto from "crypto";
+const express = require('express');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const app = express();
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "mi_token_123";
-const PRIVATE_KEY = process.env.PRIVATE_KEY as string;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'mi_token_123';
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
+
+if (!PRIVATE_KEY) {
+    console.error('❌ ERROR: PRIVATE_KEY es obligatoria');
+    process.exit(1);
+}
 
 app.use(express.json({
-    verify: (req: any, res, buf) => {
+    verify: (req, res, buf) => {
         req.rawBody = buf;
     }
 }));
 
-// ✅ 1. VERIFICACIÓN DEL WEBHOOK - OBLIGATORIO
+// ✅ VERIFICACIÓN DEL WEBHOOK
 app.get('/', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -25,21 +30,19 @@ app.get('/', (req, res) => {
     res.status(403).end();
 });
 
-// ✅ 2. DECRYPT - CORREGIDO A AES-128-CBC
-const decryptRequest = (body: any, privatePem: string) => {
+// 🔓 DECRYPT
+const decryptRequest = (body, privatePem) => {
     const { encrypted_aes_key, encrypted_flow_data, initial_vector } = body;
 
-    // Decrypt AES key
     const decryptedAesKey = crypto.privateDecrypt(
         {
-            key: crypto.createPrivateKey(privatePem),
+            key: privatePem,
             padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
             oaepHash: "sha256",
         },
         Buffer.from(encrypted_aes_key, "base64"),
     );
 
-    // Decrypt Flow data - AES-128-CBC (NO GCM)
     const iv = Buffer.from(initial_vector, "base64");
     const encryptedData = Buffer.from(encrypted_flow_data, "base64");
 
@@ -58,13 +61,8 @@ const decryptRequest = (body: any, privatePem: string) => {
     };
 };
 
-// ✅ 3. ENCRYPT - CORREGIDO A AES-128-CBC SIN FLIP
-const encryptResponse = (
-    response: any,
-    aesKeyBuffer: Buffer,
-    initialVectorBuffer: Buffer,
-) => {
-    // Usar el MISMO IV, sin flip
+// 🔐 ENCRYPT
+const encryptResponse = (response, aesKeyBuffer, initialVectorBuffer) => {
     const cipher = crypto.createCipheriv("aes-128-cbc", aesKeyBuffer, initialVectorBuffer);
     cipher.setAutoPadding(true);
 
@@ -74,9 +72,11 @@ const encryptResponse = (
     ]).toString("base64");
 };
 
-// ✅ 4. ENDPOINT PRINCIPAL - POST / (NO /data)
-app.post('/', async ({ body }, res) => {
+// 📥 ENDPOINT PRINCIPAL
+app.post('/', (req, res) => {
     try {
+        const body = req.body;
+
         // Health Check
         if (body.health_check) {
             return res.json({ status: 'healthy' });
@@ -84,78 +84,74 @@ app.post('/', async ({ body }, res) => {
 
         // Error Notification
         if (body.error && body.flow_id) {
-            console.log('Error notification:', body.error);
+            console.log('Error:', body.error);
             return res.status(200).end();
         }
 
-        // Flow Data Exchange
+        // Validar que sea un Flow
         if (!body.encrypted_flow_data || !body.encrypted_aes_key || !body.initial_vector) {
             return res.status(200).end();
         }
 
         const { decryptedBody, aesKeyBuffer, initialVectorBuffer } = decryptRequest(
             body,
-            PRIVATE_KEY,
+            PRIVATE_KEY
         );
 
-        console.log('📡 Flow recibido:', JSON.stringify(decryptedBody, null, 2));
+        console.log('📡 Flow:', JSON.stringify(decryptedBody, null, 2));
 
-        const { screen, data, version, action, flow_token } = decryptedBody;
-
-        // ✅ 5. RESPUESTA CON TODOS LOS CAMPOS REQUERIDOS
-        let responseData: any = {
-            version: "3.0",              // ✅ REQUERIDO
-            flow_token: flow_token,      // ✅ REQUERIDO
+        // Construir respuesta
+        let responseData = {
+            version: "3.0",
+            flow_token: decryptedBody.flow_token,
         };
 
-        // CASO 1: INIT - Abrir Flow
-        if (action === 'INIT' || (action === 'data_exchange' && !screen)) {
-            responseData.screen = screen || 'WELCOME';
-            // NO incluir data
+        // INIT - Abrir Flow
+        if (decryptedBody.action === 'INIT' || 
+            (decryptedBody.action === 'data_exchange' && !decryptedBody.screen)) {
+            responseData.screen = decryptedBody.screen || 'WELCOME';
         }
-        // CASO 2: data_exchange - Enviar formulario
-        else if (action === 'data_exchange' && screen) {
+        // data_exchange - Enviar formulario
+        else if (decryptedBody.action === 'data_exchange' && decryptedBody.screen) {
             responseData.screen = decryptedBody.next_screen || 'CONFIRMATION';
             responseData.data = {
-                ...data,
+                ...decryptedBody.data,
                 status: 'success',
                 processed_at: new Date().toISOString()
             };
         }
-        // CASO 3: BACK - Botón atrás
-        else if (action === 'BACK') {
+        // BACK - Botón atrás
+        else if (decryptedBody.action === 'BACK') {
             responseData.screen = decryptedBody.previous_screen || 'PREVIOUS_SCREEN';
-            // NO incluir data
         }
-        // CASO 4: component_change - Cambio de componente
+        // component_change - Cambio de componente
         else if (decryptedBody.component_id) {
-            responseData.screen = screen;
+            responseData.screen = decryptedBody.screen;
             responseData.data = {
-                ...data,
+                ...decryptedBody.data,
                 [decryptedBody.component_id]: decryptedBody.component_value
             };
         }
         // Default
         else {
-            responseData.screen = screen || 'RESPONSE';
-            if (data) {
-                responseData.data = data;
+            responseData.screen = decryptedBody.screen || 'RESPONSE';
+            if (decryptedBody.data) {
+                responseData.data = decryptedBody.data;
             }
         }
 
-        // Encrypt y enviar
+        // Encriptar y enviar
         const encryptedResponse = encryptResponse(
             responseData,
             aesKeyBuffer,
             initialVectorBuffer
         );
 
-        console.log('✅ Respondiendo con Base64');
         res.set('Content-Type', 'text/plain');
         res.status(200).send(encryptedResponse);
 
     } catch (error) {
-        console.error('❌ Error:', error);
+        console.error('❌ Error:', error.message);
         res.status(200).end();
     }
 });
@@ -167,8 +163,7 @@ app.listen(PORT, '0.0.0.0', () => {
 ╠════════════════════════════════════════════╣
 ║  📍 Endpoint: POST /                      ║
 ║  📍 Puerto: ${PORT}                           ║
-║  🔐 Cipher: AES-128-CBC (CORRECTO)        ║
-║  ✅ IV Flip: NO (CORRECTO)               ║
+║  🔐 RSA: ${PRIVATE_KEY ? '✅' : '❌'}                         ║
 ╚════════════════════════════════════════════╝
     `);
 });

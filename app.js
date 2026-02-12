@@ -37,24 +37,34 @@ function verifySignature(req, res, next) {
   next();
 }
 
-// ✅ VERIFICACIÓN - Versión CORREGIDA
+// ✅ VERIFICACIÓN - CON BASE64 (LO QUE META ESPERA)
 app.get(['/', '/webhook'], (req, res) => {
   const { 'hub.mode': mode, 'hub.challenge': challenge, 'hub.verify_token': token } = req.query;
 
-  console.log('\n🔐 Verificación de webhook recibida:');
-  console.log('  └─ mode:', mode);
-  console.log('  └─ challenge:', challenge);
-  console.log('  └─ token recibido:', token);
-  console.log('  └─ token esperado:', verifyToken);
+  console.log('\n' + '='.repeat(50));
+  console.log('🔐 VERIFICACIÓN DE WEBHOOK');
+  console.log('='.repeat(50));
+  console.log('  📍 Mode:', mode);
+  console.log('  📍 Challenge (original):', challenge);
+  console.log('  📍 Token recibido:', token);
+  console.log('  📍 Token esperado:', verifyToken);
+  console.log('-'.repeat(50));
 
   if (mode === 'subscribe' && token === verifyToken) {
-    console.log('  └─ ✅ VERIFICACIÓN EXITOSA');
+    // 🔐 CONVERTIR A BASE64 - Meta espera el challenge en Base64
+    const challengeBase64 = Buffer.from(String(challenge)).toString('base64');
     
-    // ⚠️ CRÍTICO: Enviar SOLO el challenge como string, sin JSON.stringify
+    console.log('  ✅ VERIFICACIÓN EXITOSA');
+    console.log('  🔑 Challenge en Base64:', challengeBase64);
+    console.log('='.repeat(50));
+    
+    // Enviar SOLO el Base64, nada más
     res.set('Content-Type', 'text/plain');
-    res.status(200).send(String(challenge));
+    res.status(200).send(challengeBase64);
   } else {
-    console.log('  └─ ❌ VERIFICACIÓN FALLIDA - Token inválido');
+    console.log('  ❌ VERIFICACIÓN FALLIDA');
+    console.log('  ⚠️  El token no coincide');
+    console.log('='.repeat(50));
     res.status(403).end();
   }
 });
@@ -62,8 +72,25 @@ app.get(['/', '/webhook'], (req, res) => {
 // 📥 RECEPCIÓN de mensajes (POST)
 app.post(['/', '/webhook'], verifySignature, (req, res) => {
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  console.log(`\n📡 Webhook recibido ${timestamp}`);
+  console.log(`\n📡 Webhook POST recibido ${timestamp}`);
   console.log('📦 Payload:', JSON.stringify(req.body, null, 2));
+  
+  // Procesar mensajes Flow aquí...
+  if (req.body.entry) {
+    req.body.entry.forEach(entry => {
+      if (entry.changes) {
+        entry.changes.forEach(change => {
+          if (change.value && change.value.messages) {
+            change.value.messages.forEach(message => {
+              if (message.type === 'interactive' && message.interactive) {
+                console.log('🎯 Mensaje Flow detectado:', message.interactive);
+              }
+            });
+          }
+        });
+      }
+    });
+  }
   
   // Siempre responder 200 OK
   res.status(200).end();
@@ -73,22 +100,39 @@ app.post(['/', '/webhook'], verifySignature, (req, res) => {
 app.get('/status', (req, res) => {
   res.send(`
     <html>
-      <head><title>Webhook Meta Flow</title></head>
-      <body style="font-family: Arial; padding: 20px;">
-        <h1>🚀 Webhook Server para Meta Flow</h1>
-        <p>✅ Servidor funcionando correctamente</p>
-        <p>📅 ${new Date().toLocaleString()}</p>
-        <hr>
-        <h3>Configuración:</h3>
-        <ul>
-          <li>VERIFY_TOKEN: ${verifyToken ? '✅ Configurado' : '❌ No configurado'}</li>
-          <li>APP_SECRET: ${appSecret ? '✅ Configurado' : '⚠️ Opcional'}</li>
-        </ul>
-        <h3>Endpoints activos:</h3>
-        <ul>
-          <li>GET / o /webhook - Verificación de webhook</li>
-          <li>POST / o /webhook - Recepción de mensajes</li>
-        </ul>
+      <head>
+        <title>Webhook Meta Flow</title>
+        <style>
+          body { font-family: Arial, sans-serif; padding: 30px; background: #f5f5f5; }
+          .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+          .success { color: green; }
+          .warning { color: orange; }
+          code { background: #f0f0f0; padding: 2px 5px; border-radius: 3px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>🚀 Webhook Server para Meta Flow</h1>
+          <p class="success">✅ Servidor funcionando correctamente con codificación Base64</p>
+          <p>📅 ${new Date().toLocaleString()}</p>
+          <hr>
+          <h3>⚙️ Configuración:</h3>
+          <ul>
+            <li>VERIFY_TOKEN: ${verifyToken ? '✅ Configurado' : '❌ No configurado'}</li>
+            <li>APP_SECRET: ${appSecret ? '✅ Configurado' : '⚠️ Opcional'}</li>
+          </ul>
+          <h3>📌 Endpoints activos:</h3>
+          <ul>
+            <li><code>GET /</code> o <code>/webhook</code> - Verificación (responde con Base64)</li>
+            <li><code>POST /</code> o <code>/webhook</code> - Recepción de mensajes</li>
+            <li><code>GET /status</code> - Esta página</li>
+          </ul>
+          <h3>🧪 Prueba de verificación:</h3>
+          <p>Usa este comando para probar localmente:</p>
+          <pre style="background: #333; color: #fff; padding: 10px; border-radius: 5px;">
+curl "http://localhost:${port}/webhook?hub.mode=subscribe&hub.challenge=123456789&hub.verify_token=${verifyToken || 'TU_TOKEN'}"
+          </pre>
+        </div>
       </body>
     </html>
   `);
@@ -97,13 +141,21 @@ app.get('/status', (req, res) => {
 // Iniciar servidor
 app.listen(port, () => {
   console.log(`
-╔════════════════════════════════════════╗
-║   🚀 Servidor Webhook para Meta Flow   ║
-╠════════════════════════════════════════╣
-║  Puerto:     ${port}                         ║
-║  Rutas:      GET/POST /, /webhook       ║
-║  VerifyToken: ${verifyToken ? '✅' : '❌'}                          ║
-║  AppSecret:  ${appSecret ? '✅' : '⚠️'}                          ║
-╚════════════════════════════════════════╝
+╔════════════════════════════════════════════════════╗
+║     🚀 SERVIDOR WEBHOOK PARA META FLOW            ║
+╠════════════════════════════════════════════════════╣
+║  📍 Puerto:      ${port}                              ║
+║  📍 Rutas:       GET/POST /, /webhook              ║
+║  🔐 Verificación: BASE64 ENCODED                   ║
+╠════════════════════════════════════════════════════╣
+║  🎯 Verify Token: ${verifyToken ? '✅' : '❌'}                               ║
+║  🔑 App Secret:   ${appSecret ? '✅' : '⚠️ Opcional'}                        ║
+╚════════════════════════════════════════════════════╝
   `);
+  
+  // Ejemplo de challenge en Base64 para pruebas
+  const testChallenge = "123456789";
+  const testBase64 = Buffer.from(testChallenge).toString('base64');
+  console.log('\n📝 Ejemplo de codificación Base64:');
+  console.log(`   Challenge: ${testChallenge} → Base64: ${testBase64}\n`);
 });

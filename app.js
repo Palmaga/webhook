@@ -1,6 +1,7 @@
 // Import Express.js
 const express = require('express');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken'); // Necesario para flow_token_signature
 
 const app = express();
 
@@ -13,6 +14,7 @@ app.use(express.json({
 
 const port = process.env.PORT || 3000;
 const verifyToken = process.env.VERIFY_TOKEN;
+const appSecret = process.env.APP_SECRET; // Necesario para verificar JWT
 let privateKey = process.env.PRIVATE_KEY;
 
 // Formatear llave privada correctamente
@@ -31,6 +33,23 @@ app.get(['/', '/webhook'], (req, res) => {
     return res.status(403).end();
   }
 });
+
+// 🔐 Función para verificar flow_token_signature (JWT)
+function verifyFlowTokenSignature(flowToken, signature) {
+  if (!signature || !appSecret) {
+    console.log('⚠️ No signature or APP_SECRET provided, skipping verification');
+    return true;
+  }
+  
+  try {
+    const decoded = jwt.verify(signature, appSecret);
+    console.log('✅ Flow token signature verified:', decoded);
+    return decoded.flow_token === flowToken;
+  } catch (error) {
+    console.error('❌ Invalid flow token signature:', error.message);
+    return false;
+  }
+}
 
 // 🔐 Función para desencriptar datos del Flow
 function decryptFlowData(encryptedFlowData, encryptedAesKey, initialVector) {
@@ -93,126 +112,143 @@ app.post(['/', '/webhook'], (req, res) => {
   const timestamp = new Date().toISOString();
   
   console.log('\n' + '='.repeat(60));
-  console.log(`📡 REQUEST RECIBIDO: ${timestamp}`);
+  console.log(`📡 FLOW REQUEST RECIBIDO: ${timestamp}`);
   console.log('='.repeat(60));
   
   try {
     const body = req.body;
     
     // ============================================
-    // CASO 1,2,3,4: DATA EXCHANGE REQUEST (FLOW)
+    // CASO: DATA EXCHANGE REQUEST (FLOW ENCRIPTADO)
     // ============================================
     if (body.encrypted_flow_data && body.encrypted_aes_key && body.initial_vector) {
       
-      console.log('🔐 TIPO: DATA EXCHANGE REQUEST (Flow)');
+      console.log('🔐 TIPO: DATA EXCHANGE REQUEST');
       
       if (!privateKey) {
         console.error('❌ PRIVATE_KEY no configurada');
-        return res.status(200).end(); // Solo para desarrollo
+        return res.status(200).end();
       }
       
       try {
-        // Desencriptar request
+        // 1️⃣ Desencriptar request
         const { aesKey, iv, data: flowData } = decryptFlowData(
           body.encrypted_flow_data,
           body.encrypted_aes_key,
           body.initial_vector
         );
         
-        console.log('\n📊 FLOW DATA RECIBIDA:');
+        console.log('\n📊 FLOW DATA DESENCRIPTADA:');
         console.log(JSON.stringify(flowData, null, 2));
         
-        // ============================================
-        // IDENTIFICAR EL TIPO DE ACCIÓN
-        // ============================================
-        let responseData;
+        // 2️⃣ Validar versión (debe ser 3.0)
+        const version = flowData.version || '3.0';
+        if (version !== '3.0') {
+          console.log(`⚠️ Versión inesperada: ${version}, usando 3.0`);
+        }
         
-        // CASO 1: Usuario abre el Flow (data_exchange)
-        if (flowData.action === 'data_exchange' || flowData.screen === 'INITIAL') {
-          console.log('🎯 CASO 1: Usuario abre el Flow');
+        // 3️⃣ Verificar flow_token_signature (si existe)
+        if (flowData.flow_token_signature) {
+          const isValid = verifyFlowTokenSignature(
+            flowData.flow_token,
+            flowData.flow_token_signature
+          );
+          
+          if (!isValid) {
+            console.error('❌ Flow token signature inválida');
+          }
+        }
+        
+        // 4️⃣ Determinar acción y preparar respuesta según la documentación
+        let responseData = {
+          version: '3.0', // ⚠️ SIEMPRE 3.0
+        };
+        
+        // CASO: INIT - Usuario abre el Flow
+        if (flowData.action === 'INIT') {
+          console.log('🎯 ACCIÓN: INIT (Usuario abre Flow)');
           
           responseData = {
-            version: flowData.version || '3.0',
+            ...responseData,
             screen: flowData.screen || 'WELCOME',
-            data: {
-              ...flowData.data,
-              welcome_message: '¡Bienvenido al Flow!',
-              timestamp: new Date().toISOString()
-            }
+            // data NO se incluye para INIT
+            flow_token: flowData.flow_token // Mismo token que recibimos
           };
         }
         
-        // CASO 2: Usuario envía el formulario
-        else if (flowData.screen && flowData.data) {
-          console.log('🎯 CASO 2: Usuario envía formulario');
-          
-          // Procesar datos del formulario
-          console.log('📝 Datos recibidos del formulario:');
-          Object.entries(flowData.data).forEach(([key, value]) => {
-            console.log(`   • ${key}: ${value}`);
-          });
+        // CASO: BACK - Usuario presiona botón atrás
+        else if (flowData.action === 'BACK') {
+          console.log('🎯 ACCIÓN: BACK (Usuario presiona botón atrás)');
           
           responseData = {
-            version: flowData.version || '3.0',
-            screen: 'CONFIRMATION',
+            ...responseData,
+            screen: flowData.previous_screen || flowData.screen,
+            // data NO se incluye para BACK
+            flow_token: flowData.flow_token
+          };
+        }
+        
+        // CASO: data_exchange - Usuario envía formulario
+        else if (flowData.action === 'data_exchange' || flowData.screen) {
+          console.log('🎯 ACCIÓN: data_exchange (Usuario envía datos)');
+          
+          // ⚠️ IMPORTANTE: "SUCCESS" es un nombre reservado, no puede usarse
+          let screenName = 'CONFIRMATION';
+          if (flowData.screen === 'SUCCESS') {
+            console.log('⚠️ "SUCCESS" es nombre reservado, cambiando a CONFIRMATION');
+            screenName = 'CONFIRMATION';
+          } else {
+            screenName = flowData.next_screen || 'CONFIRMATION';
+          }
+          
+          responseData = {
+            ...responseData,
+            screen: screenName,
             data: {
               ...flowData.data,
               status: 'completed',
-              confirmation_message: 'Formulario recibido correctamente',
-              processed_at: new Date().toISOString()
-            }
+              confirmation_id: crypto.randomBytes(8).toString('hex'),
+              processed_at: timestamp
+            },
+            flow_token: flowData.flow_token
           };
         }
         
-        // CASO 3: Usuario presiona botón back
-        else if (flowData.action === 'back') {
-          console.log('🎯 CASO 3: Usuario presiona botón back');
-          
-          responseData = {
-            version: flowData.version || '3.0',
-            screen: flowData.previous_screen || 'PREVIOUS_SCREEN',
-            data: flowData.data || {}
-          };
-        }
-        
-        // CASO 4: Usuario cambia valor de un componente
+        // CASO: Cambio de componente (on-select-action)
         else if (flowData.component_id) {
-          console.log(`🎯 CASO 4: Usuario cambia componente: ${flowData.component_id}`);
-          console.log(`   Nuevo valor: ${flowData.component_value}`);
+          console.log(`🎯 ACCIÓN: COMPONENT_CHANGE (${flowData.component_id})`);
           
           responseData = {
-            version: flowData.version || '3.0',
+            ...responseData,
             screen: flowData.screen,
             data: {
               ...flowData.data,
               [flowData.component_id]: flowData.component_value,
               validated: true
-            }
+            },
+            flow_token: flowData.flow_token
           };
         }
         
-        // Por defecto
+        // CASO: Por defecto
         else {
-          console.log('🎯 CASO: Acción no específica');
+          console.log('🎯 ACCIÓN: Desconocida, usando defaults');
           
           responseData = {
-            version: flowData.version || '3.0',
+            ...responseData,
             screen: flowData.screen || 'RESPONSE',
-            data: {
-              ...flowData.data,
-              status: 'success',
-              message: 'Flow procesado correctamente'
-            }
+            data: flowData.data || {},
+            flow_token: flowData.flow_token
           };
         }
         
-        // Encriptar respuesta
+        console.log('\n📤 RESPUESTA PREPARADA:');
+        console.log(JSON.stringify(responseData, null, 2));
+        
+        // 5️⃣ Encriptar respuesta
         const encryptedResponse = encryptFlowResponse(responseData, aesKey, iv);
         
-        console.log('\n📤 RESPUESTA ENVIADA:');
-        console.log(`   Screen: ${responseData.screen}`);
-        console.log(`   Base64: ${encryptedResponse.substring(0, 50)}...`);
-        
+        console.log('\n✅ Enviando respuesta encriptada');
         res.set('Content-Type', 'text/plain');
         res.status(200).send(encryptedResponse);
         
@@ -231,10 +267,10 @@ app.post(['/', '/webhook'], (req, res) => {
             version: "3.0",
             screen: "ERROR",
             data: {
-              error_message: "Ocurrió un error procesando tu solicitud",
-              error_code: error.code || "500",
-              timestamp: new Date().toISOString()
-            }
+              error_message: "Error procesando solicitud",
+              error_code: error.code || "500"
+            },
+            flow_token: body.flow_token || crypto.randomBytes(16).toString('hex')
           };
           
           const encryptedError = encryptFlowResponse(errorResponse, aesKey, iv);
@@ -248,29 +284,24 @@ app.post(['/', '/webhook'], (req, res) => {
       }
       
     // ============================================
-    // CASO 5: ERROR NOTIFICATION REQUEST
+    // CASO: ERROR NOTIFICATION REQUEST
     // ============================================
     } else if (body.error && body.flow_id) {
       console.log('⚠️ TIPO: ERROR NOTIFICATION REQUEST');
       console.log(`   Flow ID: ${body.flow_id}`);
+      console.log(`   Flow Token: ${body.flow_token}`);
       console.log(`   Error: ${body.error.message || JSON.stringify(body.error)}`);
-      console.log(`   Timestamp: ${body.timestamp || new Date().toISOString()}`);
-      
-      // Aquí puedes loguear el error para debugging
-      // No necesitas responder nada especial
       res.status(200).end();
     
     // ============================================
-    // CASO 6: HEALTH CHECK REQUEST
+    // CASO: HEALTH CHECK REQUEST
     // ============================================
     } else if (body.health_check) {
       console.log('🏥 TIPO: HEALTH CHECK REQUEST');
-      
       res.status(200).json({
         status: 'healthy',
-        timestamp: new Date().toISOString(),
-        version: '1.0.0',
-        encryption: privateKey ? 'configured' : 'not_configured'
+        timestamp: timestamp,
+        version: '3.0'
       });
     
     // ============================================
@@ -278,28 +309,7 @@ app.post(['/', '/webhook'], (req, res) => {
     // ============================================
     } else if (body.entry) {
       console.log('📨 TIPO: MENSAJE WHATSAPP NORMAL');
-      
-      body.entry.forEach(entry => {
-        entry.changes?.forEach(change => {
-          if (change.value?.messages) {
-            change.value.messages.forEach(message => {
-              console.log(`   📍 De: ${message.from}`);
-              console.log(`   📍 Tipo: ${message.type}`);
-              
-              if (message.type === 'text') {
-                console.log(`   💬 Texto: ${message.text?.body}`);
-              }
-            });
-          }
-          
-          if (change.value?.statuses) {
-            change.value.statuses.forEach(status => {
-              console.log(`   📊 Estado: ${status.status}`);
-            });
-          }
-        });
-      });
-      
+      console.log(JSON.stringify(body, null, 2));
       res.status(200).end();
       
     } else {
@@ -314,24 +324,14 @@ app.post(['/', '/webhook'], (req, res) => {
   }
 });
 
-// 📊 HEALTH CHECK ENDPOINT (para monitoreo)
+// 📊 Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    flows_processed: global.flowCounter || 0,
+    version: '3.0',
     encryption: privateKey ? 'configured' : 'not_configured',
-    mode: privateKey ? 'production' : 'development'
-  });
-});
-
-// 📈 MÉTRICAS (opcional)
-app.get('/metrics', (req, res) => {
-  res.json({
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    flows_processed: global.flowCounter || 0,
-    encryption_configured: !!privateKey
+    app_secret: appSecret ? 'configured' : 'not_configured'
   });
 });
 
@@ -341,7 +341,7 @@ app.get('/', (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Meta Flow Webhook</title>
+        <title>Meta Flow Webhook - Documentación</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
@@ -353,7 +353,7 @@ app.get('/', (req, res) => {
                 min-height: 100vh;
             }
             .container { 
-                max-width: 1000px; 
+                max-width: 1200px; 
                 margin: 0 auto; 
                 background: white; 
                 padding: 40px; 
@@ -372,33 +372,34 @@ app.get('/', (req, res) => {
             }
             .badge-success { background: #48bb78; color: white; }
             .badge-warning { background: #ecc94b; color: #1a202c; }
-            .badge-danger { background: #f56565; color: white; }
             .status {
-                padding: 15px;
+                padding: 20px;
                 border-radius: 10px;
                 margin: 20px 0;
                 font-weight: bold;
             }
             .status-success { background: #c6f6d5; color: #22543d; }
             .status-warning { background: #feebc8; color: #744210; }
-            .case-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 20px;
+            table {
+                width: 100%;
+                border-collapse: collapse;
                 margin: 20px 0;
             }
-            .case-card {
-                background: #f7fafc;
-                padding: 20px;
-                border-radius: 10px;
-                border-left: 4px solid #667eea;
+            th, td {
+                border: 1px solid #e2e8f0;
+                padding: 12px;
+                text-align: left;
             }
-            .case-card h3 { margin-top: 0; color: #2d3748; }
+            th {
+                background: #f7fafc;
+                font-weight: bold;
+            }
             code {
                 background: #edf2f7;
                 padding: 2px 6px;
                 border-radius: 4px;
                 font-size: 14px;
+                font-family: 'Courier New', monospace;
             }
             pre {
                 background: #2d3748;
@@ -411,76 +412,90 @@ app.get('/', (req, res) => {
     </head>
     <body>
         <div class="container">
-            <h1>🚀 Webhook Meta Flow</h1>
+            <h1>🚀 Webhook Meta Flow v3.0</h1>
             
             <div class="status ${privateKey ? 'status-success' : 'status-warning'}">
                 ${privateKey ? 
-                    '✅ MODO PRODUCCIÓN - Encriptación activa' : 
+                    '✅ MODO PRODUCCIÓN - Encriptación RSA activa' : 
                     '⚠️ MODO DESARROLLO - Sin encriptación real'}
             </div>
             
-            <h2>📋 Casos de Flow Soportados</h2>
-            <div class="case-grid">
-                <div class="case-card">
-                    <h3>📱 Caso 1</h3>
-                    <p><strong>Usuario abre el Flow</strong></p>
-                    <p><code>data_exchange</code> en parámetros</p>
-                    <p style="color: #48bb78;">✅ Implementado</p>
-                </div>
-                
-                <div class="case-card">
-                    <h3>📝 Caso 2</h3>
-                    <p><strong>Usuario envía formulario</strong></p>
-                    <p><code>on-click-action</code> = data_exchange</p>
-                    <p style="color: #48bb78;">✅ Implementado</p>
-                </div>
-                
-                <div class="case-card">
-                    <h3>🔙 Caso 3</h3>
-                    <p><strong>Botón back</strong></p>
-                    <p><code>refresh_on_back</code> = true</p>
-                    <p style="color: #48bb78;">✅ Implementado</p>
-                </div>
-                
-                <div class="case-card">
-                    <h3>🔄 Caso 4</h3>
-                    <p><strong>Cambio de componente</strong></p>
-                    <p><code>on-select-action</code> definido</p>
-                    <p style="color: #48bb78;">✅ Implementado</p>
-                </div>
-                
-                <div class="case-card">
-                    <h3>⚠️ Caso 5</h3>
-                    <p><strong>Error Notification</strong></p>
-                    <p>Respuesta inválida anterior</p>
-                    <p style="color: #48bb78;">✅ Implementado</p>
-                </div>
-                
-                <div class="case-card">
-                    <h3>🏥 Caso 6</h3>
-                    <p><strong>Health Check</strong></p>
-                    <p>Periódico de WhatsApp</p>
-                    <p style="color: #48bb78;">✅ Implementado</p>
-                </div>
-            </div>
-            
-            <h2>🔧 Configuración</h2>
+            <h2>📋 Estructura de Request (Según documentación Meta)</h2>
             <pre>
-PRIVATE_KEY: ${privateKey ? '✅ Configurada' : '❌ No configurada'}
-VERIFY_TOKEN: ${verifyToken ? '✅ Configurado' : '❌ No configurado'}
-PUERTO: ${port}
-MODO: ${privateKey ? 'PRODUCCIÓN' : 'DESARROLLO'}</pre>
+{
+  "version": "3.0",                    // Requerido, siempre 3.0
+  "screen": "SCREEN_NAME",            // Requerido (excepto INIT/BACK)
+  "action": "INIT|BACK|data_exchange", // Requerido
+  "data": { ... },                    // Opcional (INIT/BACK no lo incluyen)
+  "flow_token": "string",            // Requerido - Token de sesión
+  "flow_token_signature": "string"   // Opcional - JWT con app secret
+}</pre>
             
-            <h2>📌 Endpoints</h2>
+            <h2>📤 Estructura de Respuesta (Según documentación Meta)</h2>
+            <pre>
+{
+  "version": "3.0",        // Requerido, siempre 3.0
+  "screen": "string",      // Requerido - "SUCCESS" está reservado ❌
+  "data": { ... },        // Opcional - No incluir en INIT/BACK
+  "flow_token": "string"  // Requerido - Mismo que se recibió
+}</pre>
+            
+            <h2>🎯 Casos de Flow Implementados</h2>
+            <table>
+                <tr>
+                    <th>Caso</th>
+                    <th>Acción</th>
+                    <th>Screen</th>
+                    <th>Data</th>
+                    <th>Estado</th>
+                </tr>
+                <tr>
+                    <td>📱 Abrir Flow</td>
+                    <td><code>INIT</code></td>
+                    <td>WELCOME</td>
+                    <td>❌ No incluir</td>
+                    <td style="color: #48bb78;">✅ Implementado</td>
+                </tr>
+                <tr>
+                    <td>🔙 Botón Back</td>
+                    <td><code>BACK</code></td>
+                    <td>Anterior</td>
+                    <td>❌ No incluir</td>
+                    <td style="color: #48bb78;">✅ Implementado</td>
+                </tr>
+                <tr>
+                    <td>📝 Enviar Form</td>
+                    <td><code>data_exchange</code></td>
+                    <td>CONFIRMATION</td>
+                    <td>✅ Incluir</td>
+                    <td style="color: #48bb78;">✅ Implementado</td>
+                </tr>
+                <tr>
+                    <td>🔄 Cambio Componente</td>
+                    <td><code>component_change</code></td>
+                    <td>Misma</td>
+                    <td>✅ Incluir</td>
+                    <td style="color: #48bb78;">✅ Implementado</td>
+                </tr>
+            </table>
+            
+            <h2>🔧 Configuración Actual</h2>
+            <pre>
+VERSIÓN: 3.0
+VERIFY_TOKEN: ${verifyToken ? '✅' : '❌'}
+APP_SECRET: ${appSecret ? '✅ (JWT signatures)' : '❌ (sin verificación)'}
+PRIVATE_KEY: ${privateKey ? '✅ PRODUCCIÓN' : '⚠️ DESARROLLO'}</pre>
+            
+            <h2>⚠️ Restricciones Importantes</h2>
             <ul>
-                <li><code>GET /webhook</code> - Verificación</li>
-                <li><code>POST /webhook</code> - Todos los casos de Flow</li>
-                <li><code>GET /health</code> - Health check</li>
-                <li><code>GET /metrics</code> - Métricas</li>
+                <li><strong style="color: #f56565;">"SUCCESS" es un nombre reservado</strong> - No puede usarse como nombre de screen</li>
+                <li><strong>INIT y BACK</strong> - No deben incluir campo <code>data</code> en la respuesta</li>
+                <li><strong>Version</strong> - Siempre debe ser "3.0"</li>
+                <li><strong>flow_token</strong> - Siempre debe devolverse el mismo que se recibió</li>
             </ul>
             
             <p style="color: #718096; font-size: 14px; margin-top: 40px; text-align: center;">
-                🚀 Servidor listo para producción - ${new Date().toLocaleString()}
+                🚀 Servidor compatible con Meta Flow API v3.0 - ${new Date().toLocaleString()}
             </p>
         </div>
     </body>
@@ -488,30 +503,45 @@ MODO: ${privateKey ? 'PRODUCCIÓN' : 'DESARROLLO'}</pre>
   `);
 });
 
-// Contador de flows (opcional)
-global.flowCounter = 0;
+// Instalar jsonwebtoken si no está instalado
+try {
+  require.resolve('jsonwebtoken');
+} catch (e) {
+  console.log('⚠️ jsonwebtoken no está instalado. Ejecuta: npm install jsonwebtoken');
+}
 
 // Iniciar servidor
 app.listen(port, '0.0.0.0', () => {
   console.log('\n' + '🚀'.repeat(40));
-  console.log('   WEBHOOK META FLOW - TODOS LOS CASOS IMPLEMENTADOS');
+  console.log('   WEBHOOK META FLOW v3.0 - DOCUMENTACIÓN OFICIAL');
   console.log('🚀'.repeat(40) + '\n');
   
   console.log(`📌 Puerto: ${port}`);
+  console.log(`📌 Versión: 3.0`);
   console.log(`📌 Verify Token: ${verifyToken ? '✅' : '❌'}`);
+  console.log(`📌 App Secret: ${appSecret ? '✅ (JWT)' : '❌ (sin signatures)'}`);
   console.log(`📌 Private Key: ${privateKey ? '✅ PRODUCCIÓN' : '⚠️ DESARROLLO'}\n`);
   
-  console.log('📋 CASOS DE FLOW IMPLEMENTADOS:');
-  console.log('   ✅ Caso 1: Usuario abre el Flow (data_exchange)');
-  console.log('   ✅ Caso 2: Usuario envía formulario');
-  console.log('   ✅ Caso 3: Botón back (refresh_on_back)');
-  console.log('   ✅ Caso 4: Cambio de componente (on-select-action)');
-  console.log('   ✅ Caso 5: Error Notification');
-  console.log('   ✅ Caso 6: Health Check\n');
+  console.log('📋 CASOS IMPLEMENTADOS SEGÚN DOC:');
+  console.log('   ✅ INIT - Usuario abre Flow (sin data)');
+  console.log('   ✅ BACK - Botón atrás (sin data)');
+  console.log('   ✅ data_exchange - Envío formulario (con data)');
+  console.log('   ✅ component_change - Cambio de componente');
+  console.log('   ✅ ERROR_NOTIFICATION - Notificación de error');
+  console.log('   ✅ HEALTH_CHECK - Health check periódico\n');
   
-  console.log('📌 Endpoints:');
-  console.log(`   GET  /webhook - Verificación`);
-  console.log(`   POST /webhook - Todos los casos de Flow`);
-  console.log(`   GET  /health - Health check endpoint`);
-  console.log(`   GET  /metrics - Métricas\n`);
+  console.log('⚠️ RESTRICCIONES:');
+  console.log('   • "SUCCESS" es nombre reservado - NO USAR');
+  console.log('   • INIT/BACK - NO incluir campo data');
+  console.log('   • version - SIEMPRE "3.0"\n');
+  
+  if (!appSecret) {
+    console.log('⚠️  flow_token_signature: No se verificará (APP_SECRET no configurado)');
+  }
+  if (!privateKey) {
+    console.log('⚠️  IMPORTANTE: Modo DESARROLLO - Sin encriptación real');
+    console.log('   Configura PRIVATE_KEY para producción\n');
+  }
 });
+
+module.exports = app;

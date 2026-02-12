@@ -7,45 +7,53 @@ const app = express();
 app.use(express.json());
 
 /**
- * CONFIGURACIÓN DE SEGURIDAD
- * Asegúrate de configurar estas variables en tu entorno (.env)
+ * FUNCIÓN PARA FORMATEAR LA LLAVE
+ * Esta función toma lo que pegaste y asegura que tenga los encabezados
+ * y el formato que Node.js espera.
  */
-const PRIVATE_KEY = process.env.PRIVATE_KEY?.replace(/\\n/g, '\n') as string;
-const PASSPHRASE = process.env.PASSPHRASE || "Palma"; 
+const formatPrivateKey = (key: string): string => {
+  // 1. Quitamos espacios o saltos de línea accidentales al inicio/final
+  let cleanKey = key.trim();
+  
+  // 2. Si la llave no tiene los encabezados, no funcionará. 
+  // Pero si los tiene y están en una sola línea, necesitamos asegurar que 
+  // Node.js la reconozca. El método más seguro es este:
+  if (!cleanKey.startsWith('-----BEGIN')) {
+     throw new Error("La llave no tiene el formato PEM correcto.");
+  }
+
+  return cleanKey.replace(/\\n/g, '\n');
+};
+
+const PRIVATE_KEY = formatPrivateKey(process.env.PRIVATE_KEY as string);
+const PASSPHRASE = process.env.PASSPHRASE || "Palma";
 
 app.post("/data", async (req: Request, res: Response) => {
   try {
-    // 1. Desencriptar la petición usando la llave con contraseña
     const { decryptedBody, aesKeyBuffer, initialVectorBuffer } = decryptRequest(
       req.body,
       PRIVATE_KEY,
       PASSPHRASE
     );
 
-    console.log("Datos del Flow recibidos:", decryptedBody);
-
-    // 2. Lógica de respuesta (Ejemplo de éxito)
+    // Tu lógica de negocio aquí
     const screenData = {
       screen: "SUCCESS_SCREEN",
-      data: {
-        status: "proceso_completado",
-      },
+      data: { status: "ok" },
     };
 
-    // 3. Encriptar respuesta para Meta
     const encryptedResponse = encryptResponse(screenData, aesKeyBuffer, initialVectorBuffer);
     res.status(200).send(encryptedResponse);
 
   } catch (error: any) {
-    console.error("Error en el Flow:", error.message);
-    res.status(400).send("Error de descifrado o formato de llave incorrecto");
+    console.error("Error crítico:", error.message);
+    res.status(400).send("Error en el formato de la llave o descifrado.");
   }
 });
 
 const decryptRequest = (body: any, privatePem: string, passphrase: string) => {
   const { encrypted_aes_key, encrypted_flow_data, initial_vector } = body;
 
-  // IMPORTANTE: Se agrega 'passphrase' para manejar la ENCRYPTED PRIVATE KEY
   const decryptedAesKey = crypto.privateDecrypt(
     {
       key: crypto.createPrivateKey({
@@ -93,5 +101,5 @@ const encryptResponse = (response: any, aesKeyBuffer: Buffer, initialVectorBuffe
 };
 
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor listo en puerto ${PORT}`);
+  console.log(`🚀 Endpoint validado y corriendo en puerto ${PORT}`);
 });

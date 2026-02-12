@@ -3,64 +3,65 @@ import crypto from "crypto";
 
 const PORT = process.env.PORT || 3000;
 const app = express();
-
 app.use(express.json());
 
-/**
- * FUNCIÓN PARA FORMATEAR LA LLAVE
- * Esta función toma lo que pegaste y asegura que tenga los encabezados
- * y el formato que Node.js espera.
- */
-const formatPrivateKey = (key: string): string => {
-  // 1. Quitamos espacios o saltos de línea accidentales al inicio/final
-  let cleanKey = key.trim();
-  
-  // 2. Si la llave no tiene los encabezados, no funcionará. 
-  // Pero si los tiene y están en una sola línea, necesitamos asegurar que 
-  // Node.js la reconozca. El método más seguro es este:
-  if (!cleanKey.startsWith('-----BEGIN')) {
-     throw new Error("La llave no tiene el formato PEM correcto.");
-  }
+// --- GESTIÓN DE LA LLAVE ---
+const getPrivateKey = () => {
+  try {
+    const rawKey = process.env.PRIVATE_KEY;
+    if (!rawKey) throw new Error("La variable PRIVATE_KEY está vacía");
 
-  return cleanKey.replace(/\\n/g, '\n');
+    // Limpieza profunda: Si pegaste desde Linux, convertimos saltos de línea literales
+    const formattedKey = rawKey.replace(/\\n/g, '\n');
+
+    return crypto.createPrivateKey({
+      key: formattedKey,
+      format: 'pem',
+      passphrase: process.env.PASSPHRASE // Asegúrate de que esta variable exista
+    });
+  } catch (err: any) {
+    console.error("❌ ERROR CRÍTICO AL CARGAR LA LLAVE PRIVADA:");
+    console.error(err.message);
+    // En lugar de dejar que explote con código 1, lanzamos un error controlado
+    return null;
+  }
 };
 
-const PRIVATE_KEY = formatPrivateKey(process.env.PRIVATE_KEY as string);
-const PASSPHRASE = process.env.PASSPHRASE || "Palma";
+const PRIVATE_KEY_OBJECT = getPrivateKey();
 
+// --- ENDPOINT ---
 app.post("/data", async (req: Request, res: Response) => {
+  if (!PRIVATE_KEY_OBJECT) {
+    return res.status(500).json({ error: "Servidor no configurado: Llave privada inválida" });
+  }
+
   try {
     const { decryptedBody, aesKeyBuffer, initialVectorBuffer } = decryptRequest(
       req.body,
-      PRIVATE_KEY,
-      PASSPHRASE
+      PRIVATE_KEY_OBJECT
     );
 
-    // Tu lógica de negocio aquí
+    // Respuesta de ejemplo para Meta
     const screenData = {
-      screen: "SUCCESS_SCREEN",
-      data: { status: "ok" },
+      screen: "SUCCESS",
+      data: { message: "Listo" }
     };
 
     const encryptedResponse = encryptResponse(screenData, aesKeyBuffer, initialVectorBuffer);
     res.status(200).send(encryptedResponse);
-
   } catch (error: any) {
-    console.error("Error crítico:", error.message);
-    res.status(400).send("Error en el formato de la llave o descifrado.");
+    console.error("Error en procesamiento:", error.message);
+    res.status(400).send("Error de descifrado");
   }
 });
 
-const decryptRequest = (body: any, privatePem: string, passphrase: string) => {
+// --- FUNCIONES CORE ---
+function decryptRequest(body: any, privateKey: crypto.KeyObject) {
   const { encrypted_aes_key, encrypted_flow_data, initial_vector } = body;
 
   const decryptedAesKey = crypto.privateDecrypt(
     {
-      key: crypto.createPrivateKey({
-        key: privatePem,
-        format: 'pem',
-        passphrase: passphrase,
-      }),
+      key: privateKey,
       padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
       oaepHash: "sha256",
     },
@@ -87,9 +88,9 @@ const decryptRequest = (body: any, privatePem: string, passphrase: string) => {
     aesKeyBuffer: decryptedAesKey,
     initialVectorBuffer,
   };
-};
+}
 
-const encryptResponse = (response: any, aesKeyBuffer: Buffer, initialVectorBuffer: Buffer) => {
+function encryptResponse(response: any, aesKeyBuffer: Buffer, initialVectorBuffer: Buffer) {
   const flipped_iv = Buffer.from(initialVectorBuffer.map((byte) => ~byte));
   const cipher = crypto.createCipheriv("aes-128-gcm", aesKeyBuffer, flipped_iv);
 
@@ -98,8 +99,8 @@ const encryptResponse = (response: any, aesKeyBuffer: Buffer, initialVectorBuffe
     cipher.final(),
     cipher.getAuthTag(),
   ]).toString("base64");
-};
+}
 
 app.listen(PORT, () => {
-  console.log(`🚀 Endpoint validado y corriendo en puerto ${PORT}`);
+  console.log(`🚀 Servidor en puerto ${PORT}`);
 });

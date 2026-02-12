@@ -21,7 +21,7 @@ if (!privateKey) {
 // Formatear llave privada
 const formattedPrivateKey = privateKey.replace(/\\n/g, '\n');
 
-// ✅ 1. VERIFICACIÓN - RAÍZ
+// ✅ VERIFICACIÓN - EXACTAMENTE COMO META ESPERA
 app.get('/', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -34,19 +34,43 @@ app.get('/', (req, res) => {
     res.status(403).end();
 });
 
-// 🔐 2. DESENCRIPTAR
+// 🔐 LIMPIAR DATOS DEL EJEMPLO DE META (ELIMINAR < > y \/)
+function cleanMetaExample(data) {
+    if (!data) return data;
+    let cleaned = data;
+    // Eliminar < > del ejemplo
+    if (cleaned.startsWith('<') && cleaned.endsWith('>')) {
+        cleaned = cleaned.slice(1, -1);
+    }
+    // Eliminar . al final si existe
+    if (cleaned.endsWith('.')) {
+        cleaned = cleaned.slice(0, -1);
+    }
+    // Reemplazar \/ por /
+    cleaned = cleaned.replace(/\\\//g, '/');
+    return cleaned;
+}
+
+// 🔐 DESENCRIPTAR - MANEJA EL EJEMPLO DE META
 function decryptFlowData(encryptedFlowData, encryptedAesKey, initialVector) {
+    // Limpiar datos del ejemplo de Meta
+    const cleanKey = cleanMetaExample(encryptedAesKey);
+    const cleanIv = cleanMetaExample(initialVector);
+    const cleanData = cleanMetaExample(encryptedFlowData);
+
+    // Desencriptar AES key
     const aesKey = crypto.privateDecrypt(
         {
             key: formattedPrivateKey,
             padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
             oaepHash: 'sha256',
         },
-        Buffer.from(encryptedAesKey, 'base64')
+        Buffer.from(cleanKey, 'base64')
     );
 
-    const iv = Buffer.from(initialVector, 'base64');
-    const encryptedData = Buffer.from(encryptedFlowData, 'base64');
+    // Desencriptar flow data
+    const iv = Buffer.from(cleanIv, 'base64');
+    const encryptedData = Buffer.from(cleanData, 'base64');
 
     const decipher = crypto.createDecipheriv('aes-128-cbc', aesKey, iv);
     decipher.setAutoPadding(true);
@@ -63,7 +87,7 @@ function decryptFlowData(encryptedFlowData, encryptedAesKey, initialVector) {
     };
 }
 
-// 🔐 3. ENCRIPTAR RESPUESTA Y CONVERTIR A BASE64
+// 🔐 ENCRIPTAR RESPUESTA - EXACTAMENTE COMO EL EJEMPLO
 function encryptFlowResponse(responseData, aesKey, iv) {
     const cipher = crypto.createCipheriv('aes-128-cbc', aesKey, iv);
     cipher.setAutoPadding(true);
@@ -73,25 +97,50 @@ function encryptFlowResponse(responseData, aesKey, iv) {
         cipher.final()
     ]);
 
-    // ✅ CONVERTIR A BASE64 - ESTO ES LO QUE META ESPERA
-    const base64Response = encrypted.toString('base64');
-    
-    console.log('🔐 Respuesta en Base64:', base64Response.substring(0, 50) + '...');
-    
-    return base64Response;
+    return encrypted.toString('base64');
 }
 
-// 📥 4. RECIBIR FLOWS - RESPONDER SIEMPRE CON BASE64
+// 📥 ENDPOINT PRINCIPAL - IGUAL AL EJEMPLO DE META
 app.post('/', (req, res) => {
+    console.log('\n' + '='.repeat(60));
+    console.log('📡 FLOW REQUEST RECIBIDO');
+    console.log('='.repeat(60));
+    
     try {
         const body = req.body;
 
-        // VALIDAR QUE SEA UN FLOW
+        // ============================================
+        // CASO 6: HEALTH CHECK
+        // ============================================
+        if (body.health_check) {
+            console.log('🏥 Health Check Request');
+            return res.status(200).json({ 
+                status: 'healthy',
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        // ============================================
+        // CASO 5: ERROR NOTIFICATION
+        // ============================================
+        if (body.error && body.flow_id) {
+            console.log('⚠️ Error Notification Request');
+            console.log(`   Flow ID: ${body.flow_id}`);
+            console.log(`   Error: ${body.error.message}`);
+            return res.status(200).end();
+        }
+
+        // ============================================
+        // CASOS 1-4: DATA EXCHANGE REQUEST (FLOW)
+        // ============================================
         if (!body.encrypted_flow_data || !body.encrypted_aes_key || !body.initial_vector) {
             return res.status(200).end();
         }
 
-        console.log('\n📡 Flow recibido:', new Date().toISOString());
+        console.log('🔐 Data Exchange Request - Flow Encriptado');
+        console.log('📦 encrypted_flow_data:', body.encrypted_flow_data.substring(0, 30) + '...');
+        console.log('🔑 encrypted_aes_key:', body.encrypted_aes_key.substring(0, 30) + '...');
+        console.log('🎲 initial_vector:', body.initial_vector.substring(0, 30) + '...');
 
         // Desencriptar
         const { aesKey, iv, data: flowData } = decryptFlowData(
@@ -100,79 +149,92 @@ app.post('/', (req, res) => {
             body.initial_vector
         );
 
-        console.log('📊 Datos desencriptados:', JSON.stringify(flowData, null, 2));
+        console.log('\n📊 FLOW DATA DESENCRIPTADA:');
+        console.log(JSON.stringify(flowData, null, 2));
 
         // ============================================
-        // CONSTRUIR RESPUESTA
+        // CONSTRUIR RESPUESTA SEGÚN DOCUMENTACIÓN
         // ============================================
         let responseData = {
             version: '3.0',
-            flow_token: flowData.flow_token // ✅ SIEMPRE INCLUIR
+            flow_token: flowData.flow_token // SIEMPRE REQUERIDO
         };
 
-        // CASO: INIT - Abrir Flow
-        if (flowData.action === 'INIT' || flowData.action === 'data_exchange' && !flowData.screen) {
-            console.log('🎯 Acción: INIT');
+        // CASO 1: Usuario abre el Flow (INIT)
+        if (flowData.action === 'INIT' || (flowData.action === 'data_exchange' && !flowData.screen)) {
+            console.log('🎯 CASO 1: Usuario abre el Flow');
             responseData.screen = flowData.screen || 'WELCOME';
-            // ❌ NO INCLUIR DATA
+            // NO incluir data
         }
 
-        // CASO: data_exchange - Enviar formulario
+        // CASO 2: Usuario envía formulario
         else if (flowData.action === 'data_exchange' && flowData.screen) {
-            console.log('🎯 Acción: data_exchange');
+            console.log('🎯 CASO 2: Usuario envía formulario');
             responseData.screen = flowData.next_screen || 'CONFIRMATION';
             responseData.data = {
                 ...flowData.data,
                 status: 'success',
-                timestamp: new Date().toISOString()
+                processed_at: new Date().toISOString()
             };
         }
 
-        // CASO: BACK - Botón atrás
+        // CASO 3: Usuario presiona back
         else if (flowData.action === 'BACK') {
-            console.log('🎯 Acción: BACK');
+            console.log('🎯 CASO 3: Usuario presiona back');
             responseData.screen = flowData.previous_screen || 'PREVIOUS_SCREEN';
-            // ❌ NO INCLUIR DATA
+            // NO incluir data
         }
 
-        // CASO: component_change - Cambio de valor
+        // CASO 4: Usuario cambia componente
         else if (flowData.component_id) {
-            console.log('🎯 Acción: component_change');
+            console.log('🎯 CASO 4: Usuario cambia componente');
             responseData.screen = flowData.screen;
             responseData.data = {
                 ...flowData.data,
-                [flowData.component_id]: flowData.component_value
+                [flowData.component_id]: flowData.component_value,
+                validated: true
             };
         }
 
-        // CASO: Default
+        // Default
         else {
-            console.log('🎯 Acción: Default');
+            console.log('🎯 CASO: Default');
             responseData.screen = flowData.screen || 'RESPONSE';
             if (flowData.data) {
                 responseData.data = flowData.data;
             }
         }
 
-        // ✅ PASO CRÍTICO: Encriptar y convertir a Base64
-        const encryptedBase64 = encryptFlowResponse(responseData, aesKey, iv);
+        console.log('\n📤 RESPUESTA PREPARADA:');
+        console.log(JSON.stringify(responseData, null, 2));
 
-        // ✅ ENVIAR SOLO EL STRING BASE64 - NADA DE JSON, NADA DE HTML
-        console.log('✅ Enviando respuesta Base64');
+        // Encriptar respuesta
+        const encryptedResponse = encryptFlowResponse(responseData, aesKey, iv);
+        
+        console.log('\n✅ RESPONDIENDO CON BASE64:');
+        console.log('📦 Longitud:', encryptedResponse.length);
+        console.log('📦 Base64:', encryptedResponse.substring(0, 50) + '...');
+
+        // ⚠️ EXACTAMENTE COMO EL EJEMPLO DE META:
+        // HTTP/2 200
+        // content-type: text/plain
+        // [BASE64_STRING]
         
         res.set('Content-Type', 'text/plain');
-        res.status(200).send(encryptedBase64); // 👈 SOLO EL BASE64 STRING
+        res.status(200).send(encryptedResponse);
 
     } catch (error) {
         console.error('❌ Error:', error.message);
-        // En caso de error, responder con 200 vacío
         res.status(200).end();
     }
 });
 
-// Health check
+// Health check endpoint
 app.get('/health', (req, res) => {
-    res.json({ status: 'healthy' });
+    res.json({ 
+        status: 'healthy',
+        timestamp: new Date().toISOString()
+    });
 });
 
 // 🚀 Iniciar servidor
@@ -185,9 +247,16 @@ app.listen(port, '0.0.0.0', () => {
 ║  📍 Puerto: ${port}                                          ║
 ║  🔐 RSA: ✅ Cargada                                     ║
 ╠══════════════════════════════════════════════════════════╣
-║  ✅ Respuesta: SIEMPRE Base64 puro                     ║
-║  ✅ Content-Type: text/plain                           ║
-║  ❌ NUNCA: JSON, HTML, XML                             ║
+║  📋 CASOS IMPLEMENTADOS:                                ║
+║  ✅ CASO 1: Usuario abre Flow (INIT)                   ║
+║  ✅ CASO 2: Usuario envía formulario (data_exchange)   ║
+║  ✅ CASO 3: Usuario presiona back (BACK)               ║
+║  ✅ CASO 4: Usuario cambia componente                  ║
+║  ✅ CASO 5: Error Notification                         ║
+║  ✅ CASO 6: Health Check                               ║
+╠══════════════════════════════════════════════════════════╣
+║  ⚠️  RESPUESTA: SIEMPRE text/plain + BASE64            ║
+║  ⚠️  IGUAL AL EJEMPLO DE META                          ║
 ╚══════════════════════════════════════════════════════════╝
     `);
 });

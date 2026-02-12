@@ -11,22 +11,24 @@ app.use(express.json({
 
 const port = process.env.PORT || 3000;
 const verifyToken = process.env.VERIFY_TOKEN;
-const privateKey = process.env.PRIVATE_KEY; // OBLIGATORIO
+const privateKey = process.env.PRIVATE_KEY;
 
 if (!privateKey) {
-    console.error('❌ ERROR: PRIVATE_KEY es OBLIGATORIA para Flow');
+    console.error('❌ ERROR: PRIVATE_KEY es OBLIGATORIA');
     process.exit(1);
 }
 
 // Formatear llave privada
 const formattedPrivateKey = privateKey.replace(/\\n/g, '\n');
 
-// ✅ 1. VERIFICACIÓN DEL WEBHOOK
-app.get('/webhook', (req, res) => {
+// ✅ 1. VERIFICACIÓN - SOLO EN LA RAÍZ (PORQUE META USA /)
+app.get('/', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
 
+    console.log('🔐 Verificación en /');
+    
     if (mode === 'subscribe' && token === verifyToken) {
         console.log('✅ Webhook verificado');
         return res.status(200).send(String(challenge));
@@ -36,7 +38,6 @@ app.get('/webhook', (req, res) => {
 
 // 🔐 2. DESENCRIPTAR FLOW DATA
 function decryptFlowData(encryptedFlowData, encryptedAesKey, initialVector) {
-    // Desencriptar AES key con RSA
     const aesKey = crypto.privateDecrypt(
         {
             key: formattedPrivateKey,
@@ -46,7 +47,6 @@ function decryptFlowData(encryptedFlowData, encryptedAesKey, initialVector) {
         Buffer.from(encryptedAesKey, 'base64')
     );
 
-    // Desencriptar flow data con AES
     const iv = Buffer.from(initialVector, 'base64');
     const encryptedData = Buffer.from(encryptedFlowData, 'base64');
 
@@ -78,8 +78,8 @@ function encryptFlowResponse(responseData, aesKey, iv) {
     return encrypted.toString('base64');
 }
 
-// 📥 4. RECIBIR FLOWS
-app.post('/webhook', (req, res) => {
+// 📥 4. RECIBIR FLOWS - SOLO EN LA RAÍZ (PORQUE META USA /)
+app.post('/', (req, res) => {
     try {
         const body = req.body;
 
@@ -88,7 +88,7 @@ app.post('/webhook', (req, res) => {
             return res.status(200).end();
         }
 
-        console.log('\n📡 Flow recibido:', new Date().toISOString());
+        console.log('\n📡 Flow recibido en /:', new Date().toISOString());
 
         // Desencriptar
         const { aesKey, iv, data: flowData } = decryptFlowData(
@@ -99,19 +99,16 @@ app.post('/webhook', (req, res) => {
 
         console.log('📊 Datos:', JSON.stringify(flowData, null, 2));
 
-        // ============================================
         // RESPUESTA SEGÚN EL CASO
-        // ============================================
         let responseData = {
             version: '3.0',
-            flow_token: flowData.flow_token // SIEMPRE OBLIGATORIO
+            flow_token: flowData.flow_token
         };
 
         // CASO 1: Usuario abre Flow (INIT)
         if (flowData.action === 'INIT' || (!flowData.screen && flowData.action === 'data_exchange')) {
             console.log('🎯 Caso: Abrir Flow');
             responseData.screen = flowData.screen || 'WELCOME';
-            // NO incluir data
         }
 
         // CASO 2: Usuario envía formulario
@@ -129,7 +126,6 @@ app.post('/webhook', (req, res) => {
         else if (flowData.action === 'BACK') {
             console.log('🎯 Caso: Botón back');
             responseData.screen = flowData.previous_screen || 'PREVIOUS_SCREEN';
-            // NO incluir data
         }
 
         // CASO 4: Cambio de componente
@@ -175,14 +171,10 @@ app.listen(port, '0.0.0.0', () => {
 ╔════════════════════════════════════════════╗
 ║    🚀 FLOW WEBHOOK - PRODUCCIÓN           ║
 ╠════════════════════════════════════════════╣
-║  Puerto: ${port}                              ║
-║  Token: ${verifyToken}                       ║
-║  RSA: ✅ Cargada                          ║
-╠════════════════════════════════════════════╣
-║  ✅ INIT - Abrir Flow                     ║
-║  ✅ data_exchange - Enviar datos          ║
-║  ✅ BACK - Botón atrás                   ║
-║  ✅ component_change - Cambio valor       ║
+║  📍 Endpoint: POST /  (RAÍZ)             ║
+║  📍 Puerto: ${port}                              ║
+║  📍 Token: ${verifyToken}                       ║
+║  🔐 RSA: ✅ Cargada                       ║
 ╚════════════════════════════════════════════╝
     `);
 });
